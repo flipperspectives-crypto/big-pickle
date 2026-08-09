@@ -5,6 +5,7 @@ import json
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -17,7 +18,9 @@ from .db import (
     create_key,
     get_key,
     init_db,
+    is_charged,
     list_keys,
+    mark_charged,
     set_stripe_customer,
     usage_all,
     usage_for,
@@ -25,6 +28,13 @@ from .db import (
 from .router import UpstreamError, available_models, run_completion
 
 app = FastAPI(title="Big Pickle", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 init_db()
 
@@ -102,7 +112,7 @@ async def create_customer_key(
     req: KeyRequest,
     x_admin_key: str | None = Header(None),
 ):
-    if x_admin_key != settings.ADMIN_KEY:
+    if not hmac.compare_digest(x_admin_key or "", settings.ADMIN_KEY):
         raise HTTPException(401, "admin key required")
     if not req.name.strip():
         raise HTTPException(400, "name required")
@@ -119,6 +129,7 @@ async def signup(req: KeyRequest):
         "skey": key["skey"],
         "balance_usd": 0.0,
         "status": "pending_topup",
+        "stripe_enabled": bool(settings.STRIPE_API_KEY and settings.STRIPE_PRICE_ID),
         "message": "Key created. Top up credits to enable cloud models; local models are free.",
     }
 
@@ -129,7 +140,12 @@ async def customer_usage(
     x_api_key: str | None = Header(None),
 ):
     key = _customer_key(authorization, x_api_key)
-    return {**usage_for(key["id"]), "balance_usd": balance_for(key["id"])}
+    return {
+        **usage_for(key["id"]),
+        "balance_usd": balance_for(key["id"]),
+        "stripe_enabled": bool(settings.STRIPE_API_KEY and settings.STRIPE_PRICE_ID),
+        "price_usd": settings.STRIPE_PRICE_USD,
+    }
 
 
 @app.post("/v1/credits")
@@ -137,11 +153,13 @@ async def add_credits_endpoint(
     req: CreditRequest,
     x_admin_key: str | None = Header(None),
 ):
-    if x_admin_key != settings.ADMIN_KEY:
+    if not hmac.compare_digest(x_admin_key or "", settings.ADMIN_KEY):
         raise HTTPException(401, "admin key required")
     if req.amount <= 0:
         raise HTTPException(400, "amount must be positive")
     balance = add_credits(req.key_id, req.amount)
+    if balance is None:
+        raise HTTPException(404, "key not found")
     return {"key_id": req.key_id, "added_usd": req.amount, "balance_usd": balance}
 
 
@@ -156,6 +174,32 @@ async def admin_usage(x_admin_key: str | None = Header(None)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/v1/checkout")
+async def create_checkout(
+    request: Request,
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None),
+):
+    key = _customer_key(authorization, x_api_key)
+    if not settings.STRIPE_API_KEY or not settings.STRIPE_PRICE_ID:
+        raise HTTPException(501, "stripe not configured")
+    import stripe
+
+    stripe.api_key = settings.STRIPE_API_KEY
+    base = str(request.base_url).rstrip("/")
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            line_items=[{"price": settings.STRIPE_PRICE_ID, "quantity": 1}],
+            metadata={"gateway_key_id": key["id"]},
+            success_url=f"{base}/?paid=1",
+            cancel_url=f"{base}/",
+        )
+    except Exception as e:
+        raise HTTPException(502, f"stripe checkout failed: {e}")
+    return {"url": session.url, "amount_usd": settings.STRIPE_PRICE_USD}
 
 
 @app.post("/v1/webhooks/stripe")
@@ -173,9 +217,16 @@ async def stripe_webhook(request: Request):
     if event.get("type") == "checkout.session.completed":
         session = event.get("data", {}).get("object", {})
         cid = session.get("metadata", {}).get("gateway_key_id")
+        sid = session.get("id")
         customer = session.get("customer")
-        if cid and customer:
-            set_stripe_customer(cid, customer)
+        if cid and sid:
+            if customer:
+                set_stripe_customer(cid, customer)
+            if not is_charged(sid):
+                amount = (session.get("amount_total") or 0) / 100.0
+                if amount > 0:
+                    add_credits(cid, amount)
+                    mark_charged(sid, cid, amount)
     return {"received": True}
 
 

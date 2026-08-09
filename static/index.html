@@ -99,6 +99,14 @@
       <p style="font-size:14px;color:var(--muted)">Credits are consumed at retail rate per token. Balance is checked before every
          request — if you run out, you get a <code>402 Payment Required</code> and a top-up link. No subscription, no surprise bills.</p>
       <p style="font-size:13px;color:var(--green);margin-top:10px">Local (self-hosted) models are billed at $0 and never hit a cloud provider.</p>
+      <div id="topup-block" class="hidden" style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+        <label for="topup-key">Your API key (gw_…)</label>
+        <div class="keybox">
+          <input type="text" id="topup-key" placeholder="gw_…">
+          <button class="ghost" id="topup-btn" style="margin-top:0;white-space:nowrap">Top up <span id="topup-price"></span></button>
+        </div>
+        <div class="err" id="topup-err"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -192,9 +200,31 @@ $("signup-btn").onclick = async () => {
     });
     $("signup-skey").value = d.skey;
     $("pg-key").value = d.skey;
+    if (d.stripe_enabled) { $("topup-key").value = d.skey; $("topup-block").classList.remove("hidden"); }
   } catch (e) { $("signup-err").textContent = e.message; }
 };
 $("copy-skey").onclick = () => { $("signup-skey").select(); navigator.clipboard?.writeText($("signup-skey").value); };
+
+// top up (stripe checkout)
+$("topup-btn").onclick = async () => {
+  $("topup-err").textContent = "";
+  const key = $("topup-key").value.trim();
+  if (!key) { $("topup-err").textContent = "enter your API key first"; return; }
+  try {
+    const d = await api("/v1/checkout", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + key },
+    });
+    window.location.href = d.url;
+  } catch (e) { $("topup-err").textContent = e.message; }
+};
+api("/v1/usage", { headers: { "Authorization": "Bearer " + (localStorage.getItem("bp-key") || "") } })
+  .then((d) => {
+    if (d.stripe_enabled) {
+      $("topup-block").classList.remove("hidden");
+      $("topup-price").textContent = `$${d.price_usd}`;
+    }
+  }).catch(() => {});
 
 // playground
 $("pg-run").onclick = async () => {

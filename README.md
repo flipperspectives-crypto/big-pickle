@@ -50,6 +50,7 @@ docker run -p 7860:7860 \
 | `GATEWAY_<PROVIDER>_KEY` | — | e.g. `GATEWAY_GROQ_KEY`, `GATEWAY_OPENAI_KEY`, … |
 | `HF_TOKEN` | — | optional Hugging Face key (`GATEWAY_HF_KEY` alias) |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` | — | optional Stripe webhook verification |
+| `STRIPE_API_KEY`, `STRIPE_PRICE_USD` | — | enable Stripe checkout top-ups (`/v1/checkout`) |
 
 Local inference: set Ollama's OpenAI-compatible endpoint as provider `local`
 (`http://127.0.0.1:11434/v1`). Any model id after `local:` is passed through to Ollama.
@@ -62,6 +63,7 @@ Local inference: set Ollama's OpenAI-compatible endpoint as provider `local`
 | `GET /v1/models` | customer key | list available canonical models |
 | `GET /v1/usage` | customer key | tokens, cost, remaining balance |
 | `POST /v1/signup` | public | create a new customer key |
+| `POST /v1/checkout` | customer key | Stripe checkout URL to top up credits |
 | `POST /v1/keys` | admin | create a key (returns `id` + `skey`) |
 | `POST /v1/credits` | admin | top up a key's balance |
 | `GET /v1/admin/usage` | admin | aggregate usage across all keys |

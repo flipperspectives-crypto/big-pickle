@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_key ON usage (key_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_time ON usage (created_at);
+CREATE TABLE IF NOT EXISTS stripe_charges (
+    session_id TEXT PRIMARY KEY,
+    key_id TEXT NOT NULL,
+    amount_usd REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -90,7 +96,8 @@ def get_key(skey: str) -> dict | None:
 def list_keys() -> list[dict]:
     conn = _conn()
     try:
-        return [dict(r) for r in conn.execute("SELECT * FROM keys ORDER BY created_at")]
+        rows = conn.execute("SELECT * FROM keys ORDER BY created_at").fetchall()
+        return [{k: v for k, v in dict(r).items() if k != "skey"} for r in rows]
     finally:
         conn.close()
 
@@ -118,14 +125,16 @@ def record_usage(
             conn.close()
 
 
-def add_credits(key_id: str, amount: float) -> float:
+def add_credits(key_id: str, amount: float) -> float | None:
     with _lock:
         conn = _conn()
         try:
-            conn.execute("UPDATE keys SET balance = balance + ? WHERE id = ?", (amount, key_id))
+            cur = conn.execute("UPDATE keys SET balance = balance + ? WHERE id = ?", (amount, key_id))
+            if cur.rowcount == 0:
+                return None
             conn.commit()
             row = conn.execute("SELECT balance FROM keys WHERE id = ?", (key_id,)).fetchone()
-            return row["balance"] if row else 0.0
+            return row["balance"] if row else None
         finally:
             conn.close()
 
@@ -185,6 +194,31 @@ def set_stripe_customer(key_id: str, customer_id: str) -> None:
             conn.execute(
                 "UPDATE keys SET stripe_customer_id = ? WHERE id = ?",
                 (customer_id, key_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def is_charged(session_id: str) -> bool:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM stripe_charges WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def mark_charged(session_id: str, key_id: str, amount_usd: float) -> None:
+    with _lock:
+        conn = _conn()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT OR IGNORE INTO stripe_charges (session_id, key_id, amount_usd, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, key_id, amount_usd, now),
             )
             conn.commit()
         finally:

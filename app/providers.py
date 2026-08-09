@@ -15,20 +15,20 @@ PRICING = {
         "zai-glm-4.7": (0.50, 1.50),
     },
     "deepinfra": {
-        "meta-llama/llama-3.3-70b-instruct": (0.20, 0.20),
-        "meta-llama/llama-3.1-8b-instruct": (0.06, 0.06),
+        "meta-llama/Llama-3.3-70B-Instruct": (0.20, 0.20),
+        "meta-llama/Llama-3.1-8B-Instruct": (0.06, 0.06),
     },
     "together": {
-        "meta-llama/llama-3.3-70b-instruct": (0.88, 0.88),
-        "meta-llama/llama-3.1-8b-instruct": (0.18, 0.18),
+        "meta-llama/Llama-3.3-70B-Instruct": (0.88, 0.88),
+        "meta-llama/Llama-3.1-8B-Instruct": (0.18, 0.18),
     },
     "fireworks": {
         "accounts/fireworks/models/llama-v3p3-70b-instruct": (0.90, 0.90),
         "accounts/fireworks/models/llama-v3p1-8b-instruct": (0.20, 0.20),
     },
     "huggingface": {
-        "meta-llama/llama-3.3-70b-instruct": (0.20, 0.20),
-        "meta-llama/llama-3.1-8b-instruct": (0.05, 0.05),
+        "meta-llama/Llama-3.3-70B-Instruct": (0.20, 0.20),
+        "meta-llama/Llama-3.1-8B-Instruct": (0.05, 0.05),
     },
     "openai": {
         "gpt-4o-mini": (0.15, 0.60),
@@ -73,6 +73,14 @@ ROUTES = {
 PROVIDER_MODEL = {
     "groq": {"gpt-oss-120b": "openai/gpt-oss-120b", "gpt-oss-20b": "openai/gpt-oss-20b"},
     "cerebras": {"llama-3.3-70b": "llama-3.3-70b", "llama-3.1-8b": "llama-3.1-8b"},
+    "deepinfra": {
+        "llama-3.3-70b-instruct": "meta-llama/Llama-3.3-70B-Instruct",
+        "llama-3.1-8b-instruct": "meta-llama/Llama-3.1-8B-Instruct",
+    },
+    "together": {
+        "llama-3.3-70b-instruct": "meta-llama/Llama-3.3-70B-Instruct",
+        "llama-3.1-8b-instruct": "meta-llama/Llama-3.1-8B-Instruct",
+    },
     "fireworks": {
         "llama-3.3-70b": "accounts/fireworks/models/llama-v3p3-70b-instruct",
         "llama-3.1-8b": "accounts/fireworks/models/llama-v3p1-8b-instruct",
@@ -121,7 +129,7 @@ def price_for(provider: str, model: str, prompt_tokens: int, completion_tokens: 
     table = PRICING.get(provider, {})
     up = upstream_model(provider, model)
     if up not in table:
-        up = "*" if "*" in table else "meta-llama/llama-3.3-70b-instruct"
+        up = "*" if "*" in table else "meta-llama/Llama-3.3-70B-Instruct"
     pin, pout = table.get(up, (0.0, 0.0))
     return (prompt_tokens / 1_000_000) * pin + (completion_tokens / 1_000_000) * pout
 
