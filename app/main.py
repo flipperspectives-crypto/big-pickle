@@ -74,8 +74,19 @@ def _customer_key(authorization: str | None, x_api_key: str | None) -> dict:
 
 @app.get("/v1/models")
 async def models(authorization: str | None = Header(None), x_api_key: str | None = Header(None)):
-    _customer_key(authorization, x_api_key)
-    return {"object": "list", "data": [{"id": m, "object": "model"} for m in available_models()]}
+    if authorization or x_api_key:
+        _customer_key(authorization, x_api_key)
+    data = []
+    for m in available_models():
+        ps = providers.providers_for(m)
+        data.append({
+            "id": m,
+            "object": "model",
+            "local": providers.is_free_model(m),
+            "providers": ps,
+            "created": 0,
+        })
+    return {"object": "list", "data": data}
 
 
 @app.post("/v1/chat/completions")

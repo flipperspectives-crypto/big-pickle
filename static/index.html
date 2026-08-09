@@ -3,246 +3,341 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Big Pickle — One API. Every Model.</title>
-<style>
-  :root {
-    --bg: #0d1110; --panel: #131a16; --line: #22302a;
-    --green: #4cd964; --green2: #2ecc71; --pickle: #88c940;
-    --txt: #e8efe9; --muted: #8aa093; --red: #ff6b6b;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--txt); font: 16px/1.55 system-ui, -apple-system, sans-serif; }
-  a { color: var(--green); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
-
-  header { border-bottom: 1px solid var(--line); padding: 14px 0; }
-  .logo { font-weight: 800; font-size: 20px; letter-spacing: .5px; }
-  .logo span { color: var(--pickle); }
-  .nav { display: flex; justify-content: space-between; align-items: center; }
-  .nav .right { display: flex; gap: 18px; align-items: center; font-size: 14px; }
-
-  .hero { padding: 64px 0 40px; text-align: center; }
-  .hero h1 { font-size: 44px; line-height: 1.15; letter-spacing: -1px; }
-  .hero h1 em { font-style: normal; color: var(--pickle); }
-  .hero p { color: var(--muted); max-width: 640px; margin: 16px auto 8px; font-size: 18px; }
-  .hero .models-avail { font-size: 13px; color: var(--green); }
-
-  .grid { display: grid; gap: 20px; margin: 24px 0; }
-  .two { grid-template-columns: 1fr 1fr; }
-  @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
-
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
-  .card h2 { font-size: 18px; margin-bottom: 14px; }
-  .card h2 small { color: var(--muted); font-weight: 400; font-size: 13px; }
-
-  .price { display: flex; gap: 12px; margin: 12px 0; flex-wrap: wrap; }
-  .ptile { flex: 1; min-width: 130px; background: #0a0e0c; border: 1px solid var(--line); border-radius: 10px; padding: 14px; text-align: center; }
-  .ptile b { display: block; font-size: 22px; color: var(--green); }
-  .ptile span { color: var(--muted); font-size: 13px; }
-
-  label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
-  input[type=text], textarea, select {
-    width: 100%; background: #0a0e0c; color: var(--txt); border: 1px solid var(--line);
-    border-radius: 8px; padding: 10px 12px; font: 14px var(--mono);
-  }
-  textarea { min-height: 72px; resize: vertical; }
-  button {
-    background: var(--green); color: #08110b; border: 0; border-radius: 8px;
-    padding: 11px 18px; font-weight: 700; font-size: 15px; cursor: pointer; margin-top: 16px;
-  }
-  button:hover { background: var(--green2); }
-  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--txt); font-weight: 500; }
-  .keybox { display: flex; gap: 8px; align-items: center; }
-  .keybox input { flex: 1; }
-  .result { margin-top: 14px; background: #0a0e0c; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 13px var(--mono); white-space: pre-wrap; min-height: 60px; }
-  .meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
-  .err { color: var(--red); font-size: 13px; margin-top: 8px; }
-  .badge { background: #1a2a20; color: var(--green); border-radius: 20px; padding: 2px 10px; font-size: 12px; border: 1px solid var(--line); }
-  code { background: #0a0e0c; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-family: var(--mono); font-size: 13px; }
-  pre { background: #0a0e0c; border: 1px solid var(--line); border-radius: 8px; padding: 14px; overflow-x: auto; font: 13px var(--mono); margin-top: 10px; }
-  footer { border-top: 1px solid var(--line); padding: 24px 0 40px; color: var(--muted); font-size: 13px; margin-top: 40px; }
-  .hidden { display: none; }
-</style>
+<meta name="description" content="Big Pickle — One OpenAI-compatible inference gateway. Cloud providers and local models, one API key, one balance, automatic failover.">
+<title>Big Pickle — One API. Every model.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;750&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header>
-  <div class="wrap nav">
-    <div class="logo">BIG<span>PICKLE</span></div>
-    <div class="right">
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top" aria-label="Big Pickle home">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-text">
+        <span class="brand-name">BIG PICKLE</span>
+        <span class="brand-sub">INFERENCE GATEWAY</span>
+      </span>
+    </a>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="#models">Models</a>
       <a href="#pricing">Pricing</a>
       <a href="#playground">Playground</a>
+      <a href="#api">API</a>
       <a href="#docs">Docs</a>
-      <span class="badge" id="health">connecting…</span>
+    </nav>
+    <div class="nav-status" id="nav-status" role="status" aria-live="polite">
+      <span class="status-dot" id="nav-status-dot" aria-hidden="true"></span>
+      <span id="nav-status-text">Checking gateway…</span>
     </div>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle menu">
+      <span aria-hidden="true"></span>
+    </button>
   </div>
 </header>
 
-<section class="hero wrap">
-  <h1>One API.<br><em>Every model.</em></h1>
-  <p>Big Pickle is an OpenAI-compatible inference gateway. One key, prepaid credits, automatic failover across
-     Groq, Cerebras, OpenAI, Anthropic, DeepInfra, Together, Fireworks, Hugging Face — and free local models.</p>
-  <p class="models-avail" id="model-count">loading models…</p>
-</section>
+<main id="main">
 
-<div class="wrap">
-  <div class="grid two">
-    <div class="card" id="pricing">
-      <h2>Pricing <small>— prepaid credits, per-token billing</small></h2>
-      <div class="price">
-        <div class="ptile"><b>$5</b><span>starter</span></div>
-        <div class="ptile"><b>$25</b><span>pro</span></div>
-        <div class="ptile"><b>$100</b><span>scale</span></div>
-        <div class="ptile"><b>$0</b><span>local models</span></div>
+  <!-- HERO -->
+  <section class="hero" id="top" aria-label="Big Pickle overview">
+    <div class="wrap">
+      <div class="hero-eyebrow">Unified AI Infrastructure</div>
+      <h1>One API.<br><span class="accent">Every model.</span></h1>
+      <p>
+        One OpenAI-compatible gateway. Cloud providers and local inference.
+        Automatic routing and failover across everything you connect.
+        One API key. One balance. No unnecessary complexity.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#credentials">Get API Key</a>
+        <a class="btn btn-ghost" href="#playground">Open Playground</a>
       </div>
-      <p style="font-size:14px;color:var(--muted)">Credits are consumed at retail rate per token. Balance is checked before every
-         request — if you run out, you get a <code>402 Payment Required</code> and a top-up link. No subscription, no surprise bills.</p>
-      <p style="font-size:13px;color:var(--green);margin-top:10px">Local (self-hosted) models are billed at $0 and never hit a cloud provider.</p>
-      <div id="topup-block" class="hidden" style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
-        <label for="topup-key">Your API key (gw_…)</label>
-        <div class="keybox">
-          <input type="text" id="topup-key" placeholder="gw_…">
-          <button class="ghost" id="topup-btn" style="margin-top:0;white-space:nowrap">Top up <span id="topup-price"></span></button>
+
+      <div class="routing" id="routing" aria-hidden="true">
+        <div class="routing-track">
+          <div class="routing-line"></div>
+          <span class="routing-node">Request</span>
+          <span class="routing-node core">Big Pickle</span>
+          <span class="routing-node">Provider</span>
+          <span class="routing-node">Response</span>
+          <span class="routing-packet" id="routing-packet"></span>
         </div>
-        <div class="err" id="topup-err"></div>
+        <div class="routing-caption">automatic routing · failover · metered per token</div>
       </div>
     </div>
+  </section>
 
-    <div class="card">
-      <h2>Get your key</h2>
-      <label for="signup-name">Your name / app name</label>
-      <input type="text" id="signup-name" placeholder="my-app">
-      <button id="signup-btn">Create API key</button>
-      <div class="keybox" id="signup-result" style="margin-top:14px">
-        <input type="text" id="signup-skey" readonly placeholder="your key will appear here" style="width:100%">
-        <button class="ghost" id="copy-skey" style="margin-top:0;white-space:nowrap">copy</button>
+  <!-- MODELS -->
+  <section class="section" id="models" aria-labelledby="models-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Live catalog</div>
+        <h2 id="models-title">Models</h2>
+        <p>Every model served by this gateway, pulled live from the backend. Local models run on your own hardware at $0.</p>
       </div>
-      <div class="err" id="signup-err"></div>
-      <p style="font-size:13px;color:var(--muted);margin-top:10px">New keys start at $0.00 balance. Top up to start sending traffic —
-         credits are added by the operator or via your payment method.</p>
+      <div class="model-rail" id="model-rail" role="list" aria-label="Available models">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+      <div class="model-rail" id="model-rail-error" hidden></div>
     </div>
-  </div>
+  </section>
 
-  <div class="card" id="playground" style="margin:20px 0">
-    <h2>Playground</h2>
-    <div class="grid two" style="grid-template-columns:1fr 2fr">
-      <div>
-        <label>API key</label>
-        <input type="text" id="pg-key" placeholder="gw_…">
-        <label>Model</label>
-        <select id="pg-model"></select>
-        <label>Prompt</label>
-        <textarea id="pg-prompt">Explain Big Pickle in one sentence.</textarea>
-        <button id="pg-run">Send request</button>
-        <div class="err" id="pg-err"></div>
+  <!-- PRICING -->
+  <section class="section" id="pricing" aria-labelledby="pricing-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Pricing</div>
+        <h2 id="pricing-title">Prepaid credits. Per-token billing.</h2>
+        <p>Credits are consumed at retail rate per token and checked before every request — if you run out, you get a 402 and a top-up link. No subscription, no surprise bills.</p>
       </div>
-      <div>
-        <div class="result" id="pg-result">response appears here</div>
-        <div class="meta" id="pg-meta"></div>
+      <div class="pricing-grid">
+        <div class="price-card">
+          <div class="pc-name">Starter</div>
+          <div class="pc-price">$5 <small>credit</small></div>
+          <div class="pc-desc">Try the gateway. Enough for light experimentation and small workloads across cloud models.</div>
+          <button class="btn btn-primary pc-cta" data-topup="5">Top up</button>
+          <div class="pc-meta">Credits apply to any <b class="pc-num">cloud</b> model.</div>
+        </div>
+        <div class="price-card featured">
+          <div class="pc-name">Pro</div>
+          <div class="pc-price">$25 <small>credit</small></div>
+          <div class="pc-desc">Day-to-day inference. The natural tier for apps, prototypes and steady production traffic.</div>
+          <button class="btn btn-primary pc-cta" data-topup="25">Top up</button>
+          <div class="pc-meta">Same per-token rate — just more runway.</div>
+        </div>
+        <div class="price-card">
+          <div class="pc-name">Scale</div>
+          <div class="pc-price">$100 <small>credit</small></div>
+          <div class="pc-desc">For busy production systems that want one balance and automatic failover without thinking about it.</div>
+          <button class="btn btn-primary pc-cta" data-topup="100">Top up</button>
+          <div class="pc-meta">Volume convenience on the same gateway.</div>
+        </div>
+        <div class="price-card">
+          <div class="pc-name">Local</div>
+          <div class="pc-price">$0 <small>forever</small></div>
+          <div class="pc-desc">Run supported self-hosted models through the same API at zero cost. No cloud billing for local traffic.</div>
+          <a class="btn btn-ghost pc-cta" href="#playground">Try a local model</a>
+          <div class="pc-meta">Local models are billed at <b class="pc-num">$0</b>.</div>
+        </div>
       </div>
     </div>
-  </div>
+  </section>
 
-  <div class="card" id="docs" style="margin:20px 0">
-    <h2>API — OpenAI compatible</h2>
-    <p style="font-size:14px;color:var(--muted)">Swap your base URL and key. That's it. Works with the OpenAI SDK, LangChain, llama.cpp, anything that speaks the protocol.</p>
-<pre>import openai
-client = openai.OpenAI(base_url="https://BIGPICKLE_URL/v1", api_key="gw_…")
+  <!-- CREDENTIALS / API KEY -->
+  <section class="section" id="credentials" aria-labelledby="creds-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Credentials</div>
+        <h2 id="creds-title">Get your API key</h2>
+        <p>One key for every model. Create it, store it safely, top it up when you want cloud inference.</p>
+      </div>
+      <div class="key-panel">
+        <form id="signup-form">
+          <div class="field">
+            <label for="signup-name">Name / app name</label>
+            <input class="input" type="text" id="signup-name" name="name" placeholder="my-app" autocomplete="off" maxlength="80" required>
+          </div>
+          <button class="btn btn-primary" type="submit" id="signup-btn">
+            <span class="btn-label">Create API Key</span>
+          </button>
+          <div class="error-panel" id="signup-error" hidden></div>
+        </form>
+
+        <div class="key-reveal" id="key-reveal">
+          <div class="kr-title">Your API key</div>
+          <div class="kr-note">Store it somewhere safe. It is shown once and is the only credential you need.</div>
+          <div class="keybox">
+            <input class="input mono" type="text" id="signup-skey" readonly aria-label="Generated API key">
+            <button class="btn btn-sm" type="button" id="copy-skey">Copy</button>
+          </div>
+          <div class="kr-warn">Never share this key or commit it to a repository.</div>
+        </div>
+
+        <div class="balance-row" id="balance-row" hidden>
+          <span class="balance-label">Current balance</span>
+          <span class="balance-value" id="balance-value">$0.00</span>
+        </div>
+
+        <div class="field" style="margin-top:22px">
+          <label for="topup-key">Top up with your existing key</label>
+          <div class="keybox">
+            <input class="input mono" type="text" id="topup-key" placeholder="gw_…" autocomplete="off" aria-label="API key for top-up">
+            <button class="btn btn-primary" type="button" id="topup-btn">Top up</button>
+          </div>
+          <div class="error-panel" id="topup-error" hidden></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PLAYGROUND -->
+  <section class="section" id="playground" aria-labelledby="playground-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Playground</div>
+        <h2 id="playground-title">Inference console</h2>
+        <p>Real requests against the live gateway. Pick any model from the catalog and run it.</p>
+      </div>
+      <div class="console">
+        <div class="console-panel">
+          <h3>Request</h3>
+          <div class="field">
+            <label for="pg-key">API key</label>
+            <input class="input mono" type="text" id="pg-key" placeholder="gw_…" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="pg-model">Model <span class="hint">— live from /v1/models</span></label>
+            <div class="select-wrap">
+              <button class="select-trigger" id="pg-model-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="pg-model-menu">
+                <span class="tg-label" id="pg-model-label">Select a model</span>
+                <span class="caret" aria-hidden="true">▾</span>
+              </button>
+              <div class="select-menu" id="pg-model-menu" role="listbox" hidden>
+                <input class="select-search" id="pg-model-search" type="text" placeholder="Search models…" aria-label="Search models">
+                <div class="select-options" id="pg-model-options"></div>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="pg-prompt">Prompt</label>
+            <textarea class="input" id="pg-prompt" rows="6" placeholder="Ask something…">Explain Big Pickle in one sentence.</textarea>
+          </div>
+          <button class="btn btn-primary" type="button" id="pg-run">
+            <span class="btn-label">Run inference</span>
+          </button>
+        </div>
+        <div class="console-panel">
+          <div class="out-head">
+            <h3 style="margin:0">Response</h3>
+            <span class="out-badge" id="pg-status" hidden></span>
+          </div>
+          <div class="output" id="pg-output" tabindex="0" aria-label="Inference response" aria-live="polite">
+            Run a request to see the response here.
+          </div>
+          <div class="error-panel" id="pg-error" hidden></div>
+          <div class="out-meta" id="pg-meta" hidden></div>
+          <div class="out-actions">
+            <button class="btn btn-sm" type="button" id="pg-copy" hidden>Copy response</button>
+            <button class="btn btn-sm btn-ghost" type="button" id="pg-clear">Clear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- API / CODE -->
+  <section class="section" id="api" aria-labelledby="api-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">API</div>
+        <h2 id="api-title">OpenAI compatible</h2>
+        <p>Swap your base URL and key. That's it — works with the OpenAI SDK, LangChain, curl, anything that speaks the protocol.</p>
+      </div>
+      <div class="code-card">
+        <div class="code-head">
+          <div class="code-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="tabs" role="tablist" aria-label="Code examples">
+            <button class="tab" role="tab" id="tab-python" aria-selected="true" aria-controls="panel-python">Python</button>
+            <button class="tab" role="tab" id="tab-curl" aria-selected="false" aria-controls="panel-curl" tabindex="-1">cURL</button>
+          </div>
+          <span class="code-badge">OpenAI Compatible</span>
+        </div>
+        <div class="code-body">
+          <div role="tabpanel" id="panel-python" aria-labelledby="tab-python">
+            <pre><span class="cm"># base URL is shown below — your live gateway</span>
+<span class="kw">import</span> openai
+
+client = openai.OpenAI(
+    base_url=<span class="hl" id="py-base-url">…</span>,
+    api_key=<span class="st">"gw_…"</span>,
+)
 r = client.chat.completions.create(
-    model="local:qwen2.5:0.5b",        # or gpt-4o-mini, gpt-oss-120b, llama-3.3-70b, claude-3-5-sonnet…
-    messages=[{"role": "user", "content": "hi"}],
+    model=<span class="st">"gpt-oss-120b"</span>,
+    messages=[{<span class="st">"role"</span>: <span class="st">"user"</span>, <span class="st">"content"</span>: <span class="st">"hi"</span>}],
 )
 print(r.choices[0].message.content)</pre>
-<pre>curl https://BIGPICKLE_URL/v1/chat/completions \
-  -H "Authorization: Bearer $KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"local:qwen2.5:0.5b","messages":[{"role":"user","content":"hi"}]}'</pre>
-    <p style="font-size:13px;color:var(--muted)">Also: <code>GET /v1/models</code>, <code>GET /v1/usage</code> (tokens + balance),
-       <code>POST /v1/signup</code> (create key). Balance is returned on every <code>/v1/usage</code> call.</p>
+            <button class="btn btn-sm code-copy" type="button" data-copy-target="python">Copy</button>
+          </div>
+          <div role="tabpanel" id="panel-curl" aria-labelledby="tab-curl" hidden>
+            <pre><span class="cm"># curl example — replace the key and model</span>
+curl <span class="hl" id="curl-base-url">…</span> \
+  -H <span class="st">"Authorization: Bearer $KEY"</span> \
+  -H <span class="st">"Content-Type: application/json"</span> \
+  -d <span class="st">'{"model":"gpt-oss-120b","messages":[{"role":"user","content":"hi"}]}'</span></pre>
+            <button class="btn btn-sm code-copy" type="button" data-copy-target="curl">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DOCS / STATUS -->
+  <section class="section" id="docs" aria-labelledby="docs-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Status</div>
+        <h2 id="docs-title">Gateway health</h2>
+        <p>Derived live from the backend — nothing here is hard-coded.</p>
+      </div>
+      <div class="metrics" id="metrics">
+        <div class="metric">
+          <div class="m-label">Gateway</div>
+          <div class="m-value" id="m-gateway">—</div>
+          <div class="m-sub">checked via /health</div>
+        </div>
+        <div class="metric">
+          <div class="m-label">Models</div>
+          <div class="m-value" id="m-models">—</div>
+          <div class="m-sub">available via /v1/models</div>
+        </div>
+        <div class="metric">
+          <div class="m-label">Local</div>
+          <div class="m-value" id="m-local">—</div>
+          <div class="m-sub">billed at $0</div>
+        </div>
+        <div class="metric">
+          <div class="m-label">Cloud routes</div>
+          <div class="m-value" id="m-cloud">—</div>
+          <div class="m-sub">providers behind the gateway</div>
+        </div>
+      </div>
+
+      <div class="section-head" style="margin-top:56px">
+        <div class="section-eyebrow">Reference</div>
+        <h2>Endpoints</h2>
+      </div>
+      <div class="code-card">
+        <table class="api-table">
+          <thead>
+            <tr><th>Endpoint</th><th>Auth</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>POST /v1/chat/completions</code></td><td>customer key</td><td>OpenAI chat completions (streaming supported)</td></tr>
+            <tr><td><code>GET /v1/models</code></td><td>public</td><td>list available canonical models</td></tr>
+            <tr><td><code>GET /v1/usage</code></td><td>customer key</td><td>tokens, cost, remaining balance</td></tr>
+            <tr><td><code>POST /v1/signup</code></td><td>public</td><td>create a new customer key</td></tr>
+            <tr><td><code>POST /v1/checkout</code></td><td>customer key</td><td>Stripe checkout URL to top up credits</td></tr>
+            <tr><td><code>GET /health</code></td><td>—</td><td>liveness</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <span>Big Pickle — prepaid credits · automatic failover · free local inference</span>
+    <span><a href="https://github.com/flipperspectives-crypto/big-pickle">GitHub</a></span>
   </div>
+</footer>
 
-  <footer>
-    <div class="wrap">Big Pickle Gateway v0.1 — prepaid credits · automatic failover · free local inference.</div>
-  </footer>
-</div>
-
-<script>
-const API = "";  // same origin
-async function api(path, opts = {}) {
-  const r = await fetch(API + path, opts);
-  let d; try { d = await r.json(); } catch { d = { raw: await r.text() }; }
-  if (!r.ok) throw new Error(d.detail || d.message || JSON.stringify(d).slice(0, 200));
-  return d;
-}
-const $ = (id) => document.getElementById(id);
-
-// health
-api("/health").then(() => $("health").textContent = "● online").catch(() => $("health").textContent = "○ offline");
-
-// models
-api("/v1/models").then((d) => {
-  $("model-count").textContent = `${d.data.length} models available`;
-  d.data.forEach((m) => {
-    $("pg-model").insertAdjacentHTML("beforeend", `<option value="${m.id}">${m.id}</option>`);
-  });
-  $("pg-model").insertAdjacentHTML("beforeend", `<option value="local:qwen2.5:0.5b">local:qwen2.5:0.5b (free)</option>`);
-});
-
-// signup
-$("signup-btn").onclick = async () => {
-  $("signup-err").textContent = "";
-  try {
-    const d = await api("/v1/signup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: $("signup-name").value || "app" }),
-    });
-    $("signup-skey").value = d.skey;
-    $("pg-key").value = d.skey;
-    if (d.stripe_enabled) { $("topup-key").value = d.skey; $("topup-block").classList.remove("hidden"); }
-  } catch (e) { $("signup-err").textContent = e.message; }
-};
-$("copy-skey").onclick = () => { $("signup-skey").select(); navigator.clipboard?.writeText($("signup-skey").value); };
-
-// top up (stripe checkout)
-$("topup-btn").onclick = async () => {
-  $("topup-err").textContent = "";
-  const key = $("topup-key").value.trim();
-  if (!key) { $("topup-err").textContent = "enter your API key first"; return; }
-  try {
-    const d = await api("/v1/checkout", {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + key },
-    });
-    window.location.href = d.url;
-  } catch (e) { $("topup-err").textContent = e.message; }
-};
-api("/v1/usage", { headers: { "Authorization": "Bearer " + (localStorage.getItem("bp-key") || "") } })
-  .then((d) => {
-    if (d.stripe_enabled) {
-      $("topup-block").classList.remove("hidden");
-      $("topup-price").textContent = `$${d.price_usd}`;
-    }
-  }).catch(() => {});
-
-// playground
-$("pg-run").onclick = async () => {
-  $("pg-err").textContent = ""; $("pg-result").textContent = "…";
-  try {
-    const d = await api("/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + $("pg-key").value },
-      body: JSON.stringify({ model: $("pg-model").value, messages: [{ role: "user", content: $("pg-prompt").value }] }),
-    });
-    $("pg-result").textContent = d.choices?.[0]?.message?.content ?? JSON.stringify(d, null, 2);
-    const u = d.usage || {};
-    $("pg-meta").textContent = `model=${d.model} · tokens=${u.total_tokens ?? "?"} (${u.prompt_tokens ?? 0}+${u.completion_tokens ?? 0}) · finish=${d.choices?.[0]?.finish_reason ?? "?"}`;
-  } catch (e) {
-    $("pg-err").textContent = e.message;
-    if (e.message.includes("402")) $("pg-err").textContent = "402 — insufficient balance. Top up to use cloud models (local models are free).";
-  }
-};
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>

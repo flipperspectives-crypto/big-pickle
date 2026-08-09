@@ -1,0 +1,34 @@
+# flyctl launch generated configuration
+app = "big-pickle"
+primary_region = "iad"
+
+[build]
+
+[env]
+  GATEWAY_DB = "/data/gateway.db"
+
+[mounts]
+  source = "gateway_data"
+  destination = "/data"
+
+[experimental]
+  auto_rollback = true
+
+[[services]]
+  http_checks = []
+  internal_port = 7860
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+  [[services.ports]]
+    force_https = true
+    handlers = ["http"]
+    port = 80
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
