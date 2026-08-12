@@ -42,9 +42,26 @@
       .replace(/\b[a-z0-9_-]+(?:\.[a-z0-9_-]+){1,}\.(?:com|net|org|io|ai|sh|dev|local|internal|example)\b/gi, "[host]");
   }
 
+  /* Build the /v1/chat/completions request body. Local Qwen3 models reason by
+     default in Ollama, which appends a "<think:6124c78e>…</think:6124c78e>" block; for normal
+     Playground use we disable that so responses are concise. Only local Qwen3
+     models get reasoning_effort="none" — cloud and other local models are left
+     untouched (no blanket change to unrelated providers). */
+  function buildChatBody(model, prompt) {
+    var body = {
+      model: model,
+      messages: [{ role: "user", content: prompt }]
+    };
+    if (typeof model === "string" && model.indexOf("local:qwen3:") === 0) {
+      body.reasoning_effort = "none";
+    }
+    return body;
+  }
+
   window.ClarityUX = {
     mapPlaygroundState: mapPlaygroundState,
     safeReason: safeReason,
+    buildChatBody: buildChatBody,
     PG_STATE_LABELS: PG_STATE_LABELS
   };
 
@@ -564,10 +581,7 @@
       var r = await fetch(API_BASE + "/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
-        body: JSON.stringify({
-          model: selectedModel,
-          messages: [{ role: "user", content: prompt }]
-        })
+        body: JSON.stringify(buildChatBody(selectedModel, prompt))
       });
       var d = await r.json().catch(function () { return {}; });
       if (!r.ok) {

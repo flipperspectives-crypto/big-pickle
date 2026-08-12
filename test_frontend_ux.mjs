@@ -250,5 +250,18 @@ check("search 'qwen3' narrows to local:qwen3:1.7b", !!filteredQwen && opts().len
 clickOpt(filteredQwen);
 check("search qwen3 -> selects local:qwen3:1.7b with LOCAL $0", label.textContent === "local:qwen3:1.7b");
 
+/* ---- local Qwen3 thinking disabled by default (no real inference) ---- */
+const qwenBody = ux.buildChatBody("local:qwen3:1.7b", "hi");
+check("local:qwen3:1.7b request gets reasoning_effort=none", qwenBody.reasoning_effort === "none" && qwenBody.model === "local:qwen3:1.7b");
+const qwenVerBody = ux.buildChatBody("local:qwen3:8b", "hi");
+check("local:qwen3 (other tag) request gets reasoning_effort=none", qwenVerBody.reasoning_effort === "none");
+const cloudBody = ux.buildChatBody("openai/gpt-4o", "hi");
+check("cloud model request does NOT gain reasoning_effort", cloudBody.reasoning_effort === undefined && cloudBody.model === "openai/gpt-4o");
+const otherLocalBody = ux.buildChatBody("local/llama-3-8b", "hi");
+check("non-Qwen local model unchanged (no reasoning_effort)", otherLocalBody.reasoning_effort === undefined);
+const legacyLocalBody = ux.buildChatBody("local/mistral-7b", "hi");
+check("other local model unchanged (no reasoning_effort)", legacyLocalBody.reasoning_effort === undefined);
+check("body shape preserved (model + messages + content)", qwenBody.model === "local:qwen3:1.7b" && Array.isArray(qwenBody.messages) && qwenBody.messages[0].role === "user" && qwenBody.messages[0].content === "hi");
+
 console.log(failures === 0 ? "\nALL FRONTEND UX CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
