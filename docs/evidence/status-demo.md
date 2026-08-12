@@ -146,7 +146,34 @@ values.
 No changes to `app/router.py`, `app/config.py`, `app/x402.py`, or
 `requirements.txt`. x402 architecture untouched.
 
-## 7. Verification summary
+## 7. Probe cache (production hardening)
+
+Live probes are one HTTP round-trip per provider and must not run on every
+public `/v1/status` request. `app/status.py` adds an in-memory cache guarded by
+an `asyncio.Lock`:
+
+- Results are cached for `PROBE_CACHE_TTL = 45.0s` (within the 30–60s window).
+- `get_status()` returns cached results while fresh. On expiry (or when empty)
+  it acquires the lock and refreshes the zero-cost probes **once**.
+- Concurrent requests that arrive during a refresh wait on the lock, then reuse
+  the single refreshed result — no duplicate provider probe storms. The lock is
+  re-bound to the running event loop, so it is safe under FastAPI's loop.
+- `probe_latency_ms` is always the latency from the **most recent actual probe**
+  (cached verbatim; not re-measured on a cache hit).
+- `probed_at` (ISO UTC) and `probe_age_seconds` are added at read time so users
+  know when the health measurement was taken.
+- Zero-cost / no-inference behavior and all secret/raw-error protections are
+  unchanged.
+
+### Cache tests (in `test_status.py`)
+- `test_cache_reuse_within_ttl` — two requests within TTL → exactly one probe
+  batch (`N` calls, `N` = provider count).
+- `test_ttl_refresh_after_expiry` — after TTL expires a new batch runs; a
+  third request within the new TTL is served from cache.
+- `test_concurrent_refresh_single_probe_batch` — 12 simultaneous `get_status()`
+  calls → exactly one probe batch (`N` calls), proving no storm.
+
+## 8. Verification summary
 - ✅ `/v1/status` separates `configured` / `credentials_configured` /
   `reachable` / `probe_latency_ms` / `models_in_routes`.
 - ✅ `reachable` is from a real zero-cost probe (any HTTP/TLS response counts,
@@ -155,6 +182,9 @@ No changes to `app/router.py`, `app/config.py`, `app/x402.py`, or
   explicit `false`.
 - ✅ Ambiguous `needs_key` removed.
 - ✅ No secrets / host info / raw upstream errors leaked.
-- ✅ Tests pass: `test_status.py` (4) + `test_failover.py` (mocked, labeled).
+- ✅ Probe results cached (45s TTL) behind an async lock; concurrent requests
+  share one refresh — verified by tests.
+- ✅ `probed_at` / `probe_age_seconds` expose measurement freshness.
+- ✅ Tests pass: `test_status.py` (7) + `test_failover.py` (mocked, labeled).
 - ✅ Website Status section reads exclusively from `/v1/status`.
 - ⏸️ Not deployed; not pushed (see commit). Live failover not claimed (mocked only).

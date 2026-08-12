@@ -13,6 +13,14 @@ provider's endpoint and treat ANY HTTP/TLS response (including a 401/403 auth
 challenge) as reachable. No inference is performed and no paid tokens are
 consumed. Raw upstream response bodies are never captured or returned; only a
 short, non-sensitive status class name or fixed message is recorded as `reason`.
+
+Caching / production hardening:
+  Live probes are expensive-ish (one HTTP round-trip per provider) and must not
+  run on every public request. Results are cached in-memory for a short TTL and
+  guarded by an asyncio.Lock so concurrent status requests share ONE refresh
+  instead of launching duplicate probe storms. `probe_latency_ms` is always the
+  latency from the most recent *actual* probe; `probed_at` / `probe_age_seconds`
+  tell the caller when that measurement was taken.
 """
 import asyncio
 import time
@@ -25,6 +33,30 @@ from .config import settings
 from .db import gateway_status
 
 PROBE_TIMEOUT = 3.0
+# Short cache window: long enough to absorb bursts, short enough to stay fresh.
+PROBE_CACHE_TTL = 45.0
+
+# Module-level cache + refresh lock (re-bound to the running loop on first use).
+_cache = {"data": None, "probe_time": 0.0, "probe_iso": ""}
+_refresh_lock = None
+_lock_loop = None
+
+
+def _lock() -> asyncio.Lock:
+    """Return the refresh lock, (re)bound to the currently running event loop."""
+    global _refresh_lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _refresh_lock is None or _lock_loop is not loop:
+        _refresh_lock = asyncio.Lock()
+        _lock_loop = loop
+    return _refresh_lock
+
+
+def clear_status_cache() -> None:
+    """Reset the in-memory probe cache (used by tests and on demand)."""
+    _cache["data"] = None
+    _cache["probe_time"] = 0.0
+    _cache["probe_iso"] = ""
 
 
 async def _probe(url: str):
@@ -109,3 +141,32 @@ async def build_status() -> dict:
             "note": "failover events are tested via mocked providers (test_failover.py); no real-time events recorded without inference"
         },
     }
+
+
+async def get_status() -> dict:
+    """Return the status payload, serving cached probe results within the TTL.
+
+    The first request after expiry (or when empty) refreshes the zero-cost
+    probes while holding ``_lock``; concurrent requests that arrive during a
+    refresh wait on the lock and then reuse the single refreshed result, so no
+    duplicate provider probe storms occur.
+    """
+    now = time.monotonic()
+    cached = _cache["data"]
+    if cached is not None and (now - _cache["probe_time"]) < PROBE_CACHE_TTL:
+        age = int(now - _cache["probe_time"])
+        return {**cached, "probed_at": _cache["probe_iso"], "probe_age_seconds": age}
+
+    async with _lock():
+        # Double-check after acquiring: a concurrent request may have refreshed.
+        now = time.monotonic()
+        cached = _cache["data"]
+        if cached is not None and (now - _cache["probe_time"]) < PROBE_CACHE_TTL:
+            age = int(now - _cache["probe_time"])
+            return {**cached, "probed_at": _cache["probe_iso"], "probe_age_seconds": age}
+        data = await build_status()
+        iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _cache["data"] = data
+        _cache["probe_time"] = now
+        _cache["probe_iso"] = iso
+        return {**data, "probed_at": iso, "probe_age_seconds": 0}

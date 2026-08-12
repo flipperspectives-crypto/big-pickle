@@ -26,7 +26,7 @@ from .db import (
     usage_all,
     usage_for,
 )
-from .status import build_status
+from .status import get_status
 from .router import UpstreamError, available_models, run_completion
 
 app = FastAPI(title="Clarity", version="0.1.0")
@@ -198,16 +198,18 @@ async def health():
 async def status():
     """Public, read-only reliability/status surface.
 
-    Delegates to :func:`app.status.build_status`, which reports clearly
-    separated, evidence-backed facts per provider: ``configured``,
+    Delegates to :func:`app.status.get_status`, which serves cached zero-cost
+    probe results within a short TTL (a single shared refresh under an async
+    lock, so concurrent requests never launch duplicate probe storms) and reports
+    clearly separated, evidence-backed facts per provider: ``configured``,
     ``credentials_configured``, ``reachable`` (live zero-cost probe),
-    ``probe_latency_ms``, and ``models_in_routes``. No API keys, secrets,
-    internal tokens, private host info, or raw upstream error bodies are
-    returned; unreachable/unknown providers are represented honestly
-    (``reachable: false`` or ``null`` with a reason). No uptime percentages or
-    historical statistics are invented.
+    ``probe_latency_ms``, ``models_in_routes``, plus ``probed_at`` /
+    ``probe_age_seconds``. No API keys, secrets, internal tokens, private host
+    info, or raw upstream error bodies are returned; unreachable/unknown
+    providers are represented honestly (``reachable: false`` or ``null`` with a
+    reason). No uptime percentages or historical statistics are invented.
     """
-    return await build_status()
+    return await get_status()
 
 
 @app.post("/v1/x402/topup")
