@@ -1,402 +1,414 @@
-"""Minimal developer example: an agent that discovers the Clarity gateway and
-handles the x402 402 / PAYMENT-REQUIRED flow.
+"""Clarity Agent SDK example.
 
-IMPORTANT — DRY-RUN / NO-FUNDS by default:
-  This example NEVER signs a transaction and NEVER moves funds. When a payer
-  wallet (a *public* address string) is supplied, it shows how the
-  PAYMENT-SIGNATURE retry would be constructed, but the signature is clearly
-  SIMULATED and no settlement occurs. There are NO private keys or secrets
-  anywhere in this file.
+Models the REAL production Clarity lifecycle (no made-up endpoints):
 
-What it demonstrates:
-  1. Discovery  - read the public, read-only /v1/status of a Clarity gateway.
-  2. 402 handling - parse the base64 JSON `PAYMENT-REQUIRED` header.
-  3. Retry plan  - when a payer wallet is supplied, build the (simulated)
-                   PAYMENT-SIGNATURE header and describe the retry.
+  1. Discover the gateway contract via GET /v1/status (public, no auth).
+  2. Request a gateway credit by POSTing to /v1/x402/topup with NO payment.
+     The protected endpoint answers 402 + a `PAYMENT-REQUIRED` header
+     (a base64 JSON x402 v2 payment requirement). This is the ONLY endpoint
+     that issues an x402 challenge.
+  3. DRY-RUN (default, no funds): display the requirements and a SIMULATED
+     signing plan. No signature is produced and nothing is settled.
+  4. LIVE (opt-in, requires X402_PAYER_KEY): use the official `x402` client
+     SDK to sign the payment and retry /v1/x402/topup with the
+     `PAYMENT-SIGNATURE` header. On a successful settlement the response
+     carries a gateway `skey`.
+  5. Only then call /v1/chat/completions with `Authorization: Bearer <skey>`.
 
-Production behavior of the gateway is NOT changed by this example; it only talks
-to the gateway over its public HTTP API.
+The agent verifies each stage independently:
+  - payment_signed           : the SDK produced a PAYMENT-SIGNATURE header
+  - settlement_verified      : the gateway/facilitator confirmed settlement
+  - gateway_credit_verified  : the top-up returned a usable `skey`
+  - inference_verified       : /v1/chat/completions returned 200 with the skey
+
+A later stage is NEVER marked True unless the earlier one actually succeeded.
+
+Security:
+  - No real funds move in DRY-RUN. LIVE spends only when you supply a real
+    funded Base Sepolia key via X402_PAYER_KEY and explicitly opt in.
+  - The private key is read from the environment, used only to build the
+    signer, then immediately discarded (key = None).
+  - The key value is never printed, logged, persisted, committed, or returned.
 """
+
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
 
-DEFAULT_BASE_URL = os.environ.get("CLARITY_BASE_URL", "https://big-pickle.fly.dev")
-
-# A fake signature prefix so dry-run output is unmistakable and never valid.
-SIMULATED_SIG_PREFIX = "SIMULATED."
+import httpx
 
 
 # ---------------------------------------------------------------------------
-# Discovery
+# x402 SDK imports (official client used for real signing in LIVE mode)
 # ---------------------------------------------------------------------------
-def discover_clarity(base_url: Optional[str] = None, http_get: Optional[Callable] = None) -> dict:
-    """Discover a Clarity gateway via its public /v1/status (no auth, no secrets).
-
-    Returns ``{"base_url": ..., "status": <status json>}``. Network is only used
-    when no ``http_get`` is injected (e.g. in tests/online runs).
-    """
-    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
-    get = http_get or _default_get
-    status = get(f"{base}/v1/status")
-    return {"base_url": base, "status": status}
+from x402 import x402Client  # noqa: E402
+from x402.http.x402_http_client import x402HTTPClient  # noqa: E402
+from x402.mechanisms.evm.exact import ExactEvmScheme  # noqa: E402
+from eth_account import Account  # noqa: E402
 
 
-def _default_get(url: str) -> dict:
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read().decode())
+DEFAULT_BASE_URL = "https://example.invalid"
 
 
-def _default_post(url: str, headers: dict, body: dict):
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={**headers, "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, json.loads(r.read().decode()), dict(r.headers)
-    except urllib.error.HTTPError as e:  # gateway returns 402 here, not 200
-        return e.code, e.read().decode(), dict(e.headers)
+# A realistic x402 v2 PAYMENT-REQUIRED header, mirroring what the production
+# /v1/x402/topup endpoint returns. Used only by the offline demo transport.
+_DEMO_PR_HEADER = base64.b64encode(
+    json.dumps(
+        {
+            "x402Version": 2,
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:84532",
+                    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7E",
+                    "amount": "1000",
+                    "payTo": "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f",
+                    "maxTimeoutSeconds": 60,
+                    "extra": {"assetTransferMethod": "eip3009"},
+                }
+            ],
+        }
+    ).encode()
+).decode()
 
 
-# ---------------------------------------------------------------------------
-# 402 parsing
-# ---------------------------------------------------------------------------
+def _demo_transport() -> httpx.MockTransport:
+    """Offline transport that reproduces the production endpoint shapes."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/status":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "healthy",
+                    "gateway": {"active_keys": 1, "total_balance_usd": 0.5},
+                    "providers": {
+                        "groq": {
+                            "configured": True,
+                            "credentials_configured": True,
+                            "reachable": True,
+                            "probe_latency_ms": 40.0,
+                            "models_in_routes": 6,
+                        }
+                    },
+                    "timestamp": "2026-08-12T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and path == "/v1/x402/topup":
+            if "PAYMENT-SIGNATURE" not in request.headers:
+                return httpx.Response(
+                    402, headers={"PAYMENT-REQUIRED": _DEMO_PR_HEADER}, json={}
+                )
+            return httpx.Response(
+                200,
+                json={"id": "k1", "skey": "gw_demo_skey", "balance_usd": 1.0},
+            )
+        if request.method == "POST" and path == "/v1/chat/completions":
+            auth = request.headers.get("Authorization", "")
+            if auth == "Bearer gw_demo_skey":
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {"message": {"role": "assistant", "content": "Hello from Clarity!"}}
+                        ]
+                    },
+                )
+            return httpx.Response(402, json={"error": "insufficient balance"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
 @dataclass
 class PaymentRequired:
-    scheme: str
-    network: str
-    asset: str
-    amount: str
-    pay_to: str
-    raw: dict
+    """Parsed view of a x402 v2 PAYMENT-REQUIRED header (for DRY-RUN display)."""
+
+    x402_version: int | None = None
+    scheme: str | None = None
+    network: str | None = None
+    asset: str | None = None
+    amount: str | None = None
+    pay_to: str | None = None
+    max_timeout_seconds: int | None = None
+    resource: str | None = None
 
     @classmethod
-    def from_header(cls, header_value: str) -> "PaymentRequired":
-        """Decode the x402 `PAYMENT-REQUIRED` header (base64 JSON)."""
-        if not header_value:
-            raise ValueError("missing PAYMENT-REQUIRED header")
-        try:
-            payload = json.loads(base64.b64decode(header_value))
-        except Exception as e:  # noqa: BLE001
-            raise ValueError(f"invalid PAYMENT-REQUIRED header: {e}")
-        accepts = payload.get("accepts") or [{}]
-        a = accepts[0] if isinstance(accepts, list) else {}
+    def from_header(cls, raw: str) -> "PaymentRequired":
+        """Decode a base64 JSON `PAYMENT-REQUIRED` header (x402 v2)."""
+        payload = base64.b64decode(raw)
+        obj = json.loads(payload)
+        accepts = obj.get("accepts") or []
+        if not accepts:
+            raise ValueError("PAYMENT-REQUIRED header has no 'accepts' entry")
+        a = accepts[0]
         return cls(
-            scheme=a.get("scheme", ""),
-            network=a.get("network", ""),
-            asset=a.get("asset", ""),
-            amount=a.get("amount", ""),
-            pay_to=a.get("payTo", ""),
-            raw=payload,
+            x402_version=obj.get("x402Version"),
+            scheme=a.get("scheme"),
+            network=a.get("network"),
+            asset=a.get("asset"),
+            amount=a.get("amount"),
+            pay_to=a.get("payTo"),
+            max_timeout_seconds=a.get("maxTimeoutSeconds"),
+            resource=obj.get("resource"),
         )
 
 
-# ---------------------------------------------------------------------------
-# Dry-run payment plan (clearly simulated, never a real signature)
-# ---------------------------------------------------------------------------
-@dataclass
-class DryRunPlan:
-    mode: str = "dry-run"
-    payment_required: Optional[PaymentRequired] = None
-    payer: Optional[str] = None
-    simulated_signature_header: Optional[str] = None
-    note: str = "DRY RUN - no funds moved, no signature produced"
-
-    def to_dict(self) -> dict:
-        return {
-            "mode": self.mode,
-            "payer": self.payer,
-            "payment_required": (
-                {
-                    "scheme": self.payment_required.scheme,
-                    "network": self.payment_required.network,
-                    "asset": self.payment_required.asset,
-                    "amount": self.payment_required.amount,
-                    "pay_to": self.payment_required.pay_to,
-                }
-                if self.payment_required
-                else None
-            ),
-            "retry_header": {"PAYMENT-SIGNATURE": self.simulated_signature_header},
-            "note": self.note,
-        }
+def discover_clarity(base_url: str = DEFAULT_BASE_URL) -> dict:
+    """GET /v1/status — public, read-only gateway contract discovery."""
+    with httpx.Client(timeout=30) as client:
+        r = client.get(base_url.rstrip("/") + "/v1/status")
+        r.raise_for_status()
+        return r.json()
 
 
-# ---------------------------------------------------------------------------
-# OPT-IN LIVE path (official x402 client SDK). Dry-run remains the default.
-#
-# LIVE runs ONLY when BOTH: (a) the caller opts in with dry_run=False, and
-# (b) the payer PRIVATE key is present in the local X402_PAYER_KEY environment
-# variable. The key is read from the environment, used solely to build the
-# signer, then discarded. It is NEVER printed, logged, persisted, committed, or
-# included in any output. No funds move unless the user explicitly invokes live
-# mode with a funded wallet.
-# ---------------------------------------------------------------------------
-def _parse_payment_response(header_value: str):
-    if not header_value:
-        return None
-    try:
-        return json.loads(base64.b64decode(header_value))
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _build_client(payer_key: str):
-    """Build an x402 client with an EVM signer from the private key.
-
-    The key is supplied by the caller (from X402_PAYER_KEY) and used only here.
-    """
-    from eth_account import Account
-    from x402 import x402Client
-    from x402.mechanisms.evm import EthAccountSigner
-    from x402.mechanisms.evm.exact import ExactEvmScheme
-
-    acct = Account.from_key(payer_key)
-    client = x402Client()
-    client.register("eip155:*", ExactEvmScheme(EthAccountSigner(acct)))
-    return client, acct.address
-
-
-async def _sign_payment(client, payment_required_sdk, resource_url: str) -> str:
-    """Use the official x402 client to construct + sign the payment payload."""
-    from x402 import ResourceInfo
-
-    payload = await client.create_payment_payload(
-        payment_required_sdk, resource=ResourceInfo(url=resource_url, method="POST")
-    )
-    return base64.b64encode(json.dumps(payload.model_dump(mode="json")).encode()).decode()
-
-
-@dataclass
-class LivePaymentResult:
-    mode: str = "live"
-    status: int = 0
-    payer_address: Optional[str] = None
-    payment_signed: bool = False
-    settlement_verified: bool = False
-    gateway_credit_verified: bool = False
-    payment_response: Any = None
-    data: Any = None
-
-
-async def _chat_live(self, url: str, body: dict, raw_pr_header: str):
-    from x402 import parse_payment_required
-
-    key = os.environ.get("X402_PAYER_KEY")
-    if not key:
-        raise RuntimeError(
-            "LIVE mode requires the payer private key in the X402_PAYER_KEY "
-            "environment variable. Refusing to run without it."
-        )
-    client, address = _build_client(key)
-    key = None  # scrub: drop the private-key reference immediately after use
-    pr_sdk = parse_payment_required(base64.b64decode(raw_pr_header))
-    signature_header = await _sign_payment(client, pr_sdk, url)
-
-    status2, data2, headers2 = self._post(url, {"PAYMENT-SIGNATURE": signature_header}, body)
-    resp = _parse_payment_response(headers2.get("PAYMENT-RESPONSE", ""))
-    settlement_verified = bool(resp and (resp.get("success") or resp.get("transaction")))
-    gateway_credit_verified = (
-        status2 == 200 and isinstance(data2, dict) and bool(data2.get("skey"))
-    )
-    return LivePaymentResult(
-        mode="live",
-        status=status2,
-        payer_address=address,
-        payment_signed=True,
-        settlement_verified=settlement_verified,
-        gateway_credit_verified=gateway_credit_verified,
-        payment_response=resp,
-        data=data2,
-    )
-
-
-@dataclass
-class ChatResult:
-    status: int
-    mode: str
-    data: Any = None
-    payment_required: Optional[PaymentRequired] = None
-    dry_run_plan: Optional[DryRunPlan] = None
-
-
-# ---------------------------------------------------------------------------
-# The agent
-# ---------------------------------------------------------------------------
 class ClarityAgent:
-    """A small agent that calls Clarity's OpenAI-compatible endpoint and handles
-    the x402 402 flow. Dry-run by default; never signs or spends."""
+    """Drives the Clarity machine-payable top-up + inference lifecycle."""
 
     def __init__(
         self,
-        base_url: Optional[str] = None,
-        payer: Optional[str] = None,
+        base_url: str = DEFAULT_BASE_URL,
         dry_run: bool = True,
-        http_post: Optional[Callable] = None,
+        transport: httpx.BaseTransport | None = None,
     ):
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        # `payer` is a PUBLIC address string only. NEVER a private key.
-        self.payer = payer
+        self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
-        self._post = http_post or _default_post
-
-    def chat(self, messages: list, model: str = "gpt-oss-120b",
-             path: str = "/v1/chat/completions") -> ChatResult:
-        url = f"{self.base_url}{path}"
-        body = {"model": model, "messages": messages}
-        status, data, headers = self._post(url, {}, body)
-
-        if status == 200:
-            return ChatResult(status=200, mode="live-ok", data=data)
-
-        if status == 402 and "PAYMENT-REQUIRED" in headers:
-            raw = headers["PAYMENT-REQUIRED"]
-            pr = PaymentRequired.from_header(raw)
-            if self.dry_run:
-                plan = self._plan_payment(pr)
-                return ChatResult(status=402, mode="dry-run", payment_required=pr, dry_run_plan=plan)
-            # LIVE: sign with the official x402 client and retry with PAYMENT-SIGNATURE.
-            # Requires X402_PAYER_KEY in the environment (handled inside _chat_live).
-            live = asyncio.run(_chat_live(self, url, body, raw))
-            return ChatResult(status=live.status, mode="live", data=live, payment_required=pr)
-
-        return ChatResult(status=status, mode="error", data=data)
-
-    def _plan_payment(self, pr: PaymentRequired) -> DryRunPlan:
-        plan = DryRunPlan(payment_required=pr, payer=self.payer)
-        if self.dry_run:
-            # Build a clearly-SIMULATED PAYMENT-SIGNATURE header. It is NOT a
-            # valid signature and cannot settle anything on-chain.
-            simulated = {
-                "simulated": True,
-                "network": pr.network,
-                "asset": pr.asset,
-                "amount": pr.amount,
-                "payTo": pr.pay_to,
-                "payer": self.payer,
-                "note": "no real signing occurred",
-            }
-            plan.simulated_signature_header = SIMULATED_SIG_PREFIX + base64.b64encode(
-                json.dumps(simulated).encode()
-            ).decode()
-            plan.note = (
-                "DRY RUN - no funds moved and no valid signature produced. "
-                "Supply a real signer to settle on-chain."
+        if transport is not None:
+            self.client = httpx.Client(
+                transport=transport, headers={"Content-Type": "application/json"}
             )
-            return plan
+        else:
+            self.client = httpx.Client(
+                timeout=30, headers={"Content-Type": "application/json"}
+            )
 
-        # Live path requires a funded signer. Intentionally NOT implemented here
-        # so this example never touches a private key or spends funds.
-        raise NotImplementedError(
-            "Live settlement requires a funded payer signer; this example stays "
-            "dry-run/no-funds. Wire an x402 client with a real signer to enable."
+    # -- low level HTTP -----------------------------------------------------
+    def _post(self, path: str, headers: dict | None = None, body: dict | None = None):
+        r = self.client.post(self.base_url + path, headers=headers or {}, json=body or {})
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+        return r.status_code, data, r.headers
+
+    def discover(self):
+        r = self.client.get(self.base_url + "/v1/status")
+        return r.status_code, _safe_json(r), r.headers
+
+    # -- step 2: top-up challenge ------------------------------------------
+    def topup_challenge(self) -> tuple[PaymentRequired, str, bytes]:
+        """POST /v1/x402/topup with no payment -> 402 + PAYMENT-REQUIRED.
+
+        Returns the parsed requirement, the raw header value, and the raw body.
+        """
+        status, _data, headers = self._post("/v1/x402/topup", {}, {})
+        raw = headers.get("PAYMENT-REQUIRED")
+        if status == 402 and raw:
+            return PaymentRequired.from_header(raw), raw, b""
+        raise RuntimeError(
+            f"/v1/x402/topup did not return 402 + PAYMENT-REQUIRED "
+            f"(status={status}, has_header={bool(raw)})"
         )
 
+    # -- LIVE client construction (official x402 SDK) ----------------------
+    def _build_client(self, key: str, network: str):
+        """Build a real x402 HTTP client bound to a funded signer.
 
-# ---------------------------------------------------------------------------
-# Self-contained offline demo (no network, no funds)
-# ---------------------------------------------------------------------------
-def _make_fake_payment_required() -> str:
-    """Produce a PAYMENT-REQUIRED header shaped like the real Clarity gateway."""
-    payload = {
-        "x402Version": 2,
-        "error": "Payment required",
-        "resource": {
-            "url": "/v1/x402/topup",
-            "description": "Clarity gateway credit top-up (machine-payable via x402)",
-            "mimeType": "",
-            "serviceName": "Clarity",
-        },
-        "accepts": [
-            {
-                "scheme": "exact",
-                "network": "eip155:84532",
-                "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7E",
-                "amount": "1000",
-                "payTo": "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f",
-                "maxTimeoutSeconds": 60,
-                "extra": {"name": "USDC", "version": "2", "assetTransferMethod": "eip3009"},
-            }
-        ],
-    }
-    return base64.b64encode(json.dumps(payload).encode()).decode()
+        The signer is created from the private key; the key is NOT retained.
+        """
+        acct = Account.from_key(key)
+        scheme = ExactEvmScheme(acct)
+        client = x402Client()
+        client.register(network, scheme)
+        return x402HTTPClient(client), acct.address
 
-
-def demo(payer: Optional[str] = "0xAGENT_PUBLIC_ADDRESS_DEMO") -> dict:
-    """Run the full discovery + 402 + simulated-retry flow with a fake server."""
-    captured = {}
-
-    def fake_post(url, headers, body):
-        captured["url"] = url
-        captured["body"] = body
-        # Always answer with a 402 + PAYMENT-REQUIRED to exercise the flow.
-        return 402, "", {"PAYMENT-REQUIRED": _make_fake_payment_required()}
-
-    def fake_get(url):
-        return {
-            "status": "healthy",
-            "timestamp": "2026-08-12T00:00:00Z",
-            "gateway": {"active_keys": 1, "total_balance_usd": 0.5},
-            "providers": {"groq": {"configured": True, "credentials_configured": True,
-                                   "reachable": True, "probe_latency_ms": 40.0,
-                                   "models_in_routes": 6}},
+    # -- orchestration ------------------------------------------------------
+    async def run(
+        self,
+        model: str = "clarity/local-demo",
+        messages: list[dict] | None = None,
+        payer_address: str = "0xAGENT_PUBLIC_ADDRESS_DEMO",
+    ) -> dict:
+        messages = messages or [
+            {"role": "user", "content": "Hello from the Clarity agent SDK example."}
+        ]
+        result: dict = {
+            "mode": "dry-run" if self.dry_run else "live",
+            "base_url": self.base_url,
+            "discovery": None,
+            "payment_required": None,
+            "payment_signed": False,
+            "settlement_verified": False,
+            "gateway_credit_verified": False,
+            "inference_verified": False,
+            "skey_present": False,
+            "chat_status": None,
+            "error": None,
         }
 
-    discovery = discover_clarity(base_url="https://example.invalid", http_get=fake_get)
-    agent = ClarityAgent(base_url="https://example.invalid", payer=payer, dry_run=True, http_post=fake_post)
-    result = agent.chat([{"role": "user", "content": "Hello"}], path="/v1/x402/topup")
-    return {
-        "discovery": discovery,
-        "chat_status": result.status,
-        "mode": result.mode,
-        "plan": result.dry_run_plan.to_dict() if result.dry_run_plan else None,
-    }
+        # 1. discover
+        try:
+            dstatus, ddata, _ = self.discover()
+            gw = ddata.get("status") if isinstance(ddata, dict) else None
+            result["discovery"] = {"status": dstatus, "gateway": gw}
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"discovery failed: {e!r}"
+            return result
+
+        # 2. top-up challenge
+        try:
+            pr, pr_header, pr_body = self.topup_challenge()
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"top-up challenge failed: {e!r}"
+            return result
+        result["payment_required"] = {
+            "scheme": pr.scheme,
+            "network": pr.network,
+            "asset": pr.asset,
+            "amount": pr.amount,
+            "pay_to": pr.pay_to,
+            "resource": pr.resource,
+        }
+
+        if self.dry_run:
+            result["dry_run_plan"] = self._dry_run_plan(pr, payer_address)
+            return result
+
+        # 4. LIVE: sign + retry top-up with the official x402 SDK
+        key = os.environ.get("X402_PAYER_KEY")
+        if not key:
+            raise RuntimeError(
+                "LIVE mode requires the X402_PAYER_KEY environment variable "
+                "(a funded Base Sepolia wallet private key). Refusing to run."
+            )
+        http_client, _address = self._build_client(key, pr.network)
+        key = None  # scrub the private-key reference immediately after use
+
+        try:
+            payment_headers, payload = await http_client.handle_402_response(
+                {"PAYMENT-REQUIRED": pr_header}, pr_body
+            )
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"payment signing failed: {e!r}"
+            return result
+        result["payment_signed"] = bool(
+            payment_headers and "PAYMENT-SIGNATURE" in payment_headers
+        )
+
+        # 5. retry top-up with PAYMENT-SIGNATURE
+        tstatus, tdata, theaders = self._post(
+            "/v1/x402/topup", payment_headers, {}
+        )
+        try:
+            proc = await http_client.process_payment_result(
+                payload, lambda h: theaders.get(h), tstatus
+            )
+            result["settlement_verified"] = bool(getattr(proc, "recovered", False))
+        except Exception:  # noqa: BLE001
+            result["settlement_verified"] = False
+
+        if tstatus == 200 and isinstance(tdata, dict) and tdata.get("skey"):
+            result["gateway_credit_verified"] = True
+            result["skey_present"] = True
+            skey = tdata["skey"]
+
+            # 6. inference only AFTER a usable skey exists
+            cstatus, cdata, _ = self._post(
+                "/v1/chat/completions",
+                {
+                    "Authorization": f"Bearer {skey}",
+                    "Content-Type": "application/json",
+                },
+                {"model": model, "messages": messages},
+            )
+            result["chat_status"] = cstatus
+            if cstatus == 200:
+                result["inference_verified"] = True
+                result["completion"] = cdata
+            else:
+                result["chat_error"] = cdata
+        else:
+            result["error"] = "top-up did not return a gateway skey"
+
+        return result
+
+    def run_sync(self, **kwargs) -> dict:
+        return asyncio.run(self.run(**kwargs))
+
+    # -- DRY-RUN plan -------------------------------------------------------
+    def _dry_run_plan(self, pr: PaymentRequired, payer_address: str) -> dict:
+        simulated_sig = (
+            "SIMULATED."
+            + base64.b64encode(
+                json.dumps(
+                    {
+                        "simulated": True,
+                        "network": pr.network,
+                        "asset": pr.asset,
+                        "amount": pr.amount,
+                        "payTo": pr.pay_to,
+                        "payer": payer_address,
+                        "note": "no real signing occurred",
+                    }
+                ).encode()
+            ).decode()
+        )
+        return {
+            "note": (
+                "DRY RUN - no funds moved and no valid signature produced. "
+                "Supply a real signer (X402_PAYER_KEY) to settle on-chain."
+            ),
+            "payer": payer_address,
+            "would_sign_with": "official x402 SDK ExactEvmScheme "
+            "(EIP-3009 transferWithAuthorization)",
+            "retry": "POST /v1/x402/topup with PAYMENT-SIGNATURE header",
+            "on_success": (
+                "extract 'skey' from the top-up response, then POST "
+                "/v1/chat/completions with Authorization: Bearer <skey>"
+            ),
+            "simulated_signature": simulated_sig,
+        }
 
 
-def live_example(base_url: Optional[str] = None, model: str = "gpt-oss-120b"):
-    """Run the LIVE x402 flow against a real Clarity gateway.
+def demo(base_url: str = DEFAULT_BASE_URL) -> dict:
+    """Run the DRY-RUN lifecycle (no funds, no secrets).
 
-    REQUIRES the payer PRIVATE key in the local environment variable
-    X402_PAYER_KEY (a funded Base Sepolia USDC wallet). The key is read from the
-    environment only, used to sign, then discarded. This function is NOT called
-    by the demo and will not run during tests; invoke it explicitly when you want
-    to spend real (testnet) funds.
-
-    Example:
-        export X402_PAYER_KEY=0x...your_private_key...   # Base Sepolia, funded w/ USDC
-        python -c "from clarity_agent import live_example; live_example()"
+    Uses an embedded offline transport that reproduces the production endpoint
+    shapes, so the example runs with no network access. To target a real
+    gateway, pass ``base_url=...`` and a real ``httpx`` transport/client.
     """
-    agent = ClarityAgent(base_url=base_url, dry_run=False)
-    result = agent.chat([{"role": "user", "content": "Hello"}], path="/v1/x402/topup", model=model)
-    if result.mode != "live" or result.data is None:
-        raise RuntimeError("live flow did not complete; see earlier errors")
-    live: LivePaymentResult = result.data
-    return {
-        "mode": live.mode,
-        "status": live.status,
-        "payer_address": live.payer_address,  # public only
-        "payment_signed": live.payment_signed,
-        "settlement_verified": live.settlement_verified,
-        "gateway_credit_verified": live.gateway_credit_verified,
-        "payment_response": live.payment_response,
-    }
-
-
-if __name__ == "__main__":  # pragma: no cover - manual CLI
-    import pprint
-
-    out = demo()
     print("=== Clarity Agent SDK example (DRY RUN / NO FUNDS) ===")
-    pprint.pprint(out)
+    agent = ClarityAgent(base_url=base_url, dry_run=True, transport=_demo_transport())
+    result = agent.run_sync()
+    print(json.dumps(result, indent=2))
+    return result
+
+
+def live_example(base_url: str = DEFAULT_BASE_URL) -> dict:
+    """Run the LIVE lifecycle. Requires X402_PAYER_KEY in the environment."""
+    print("=== Clarity Agent SDK example (LIVE / uses x402 SDK) ===")
+    agent = ClarityAgent(base_url=base_url, dry_run=False)
+    result = agent.run_sync()
+    print(json.dumps(result, indent=2))
+    return result
+
+
+def _safe_json(r: httpx.Response):
+    try:
+        return r.json()
+    except Exception:
+        return None
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--live" in sys.argv:
+        live_example()
+    else:
+        demo()

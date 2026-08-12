@@ -1,15 +1,21 @@
-"""Tests for the Clarity Agent SDK example.
+"""Offline tests for the Clarity Agent SDK example.
 
-All tests are OFFLINE and NO-FUNDS: they inject fake HTTP callables, never touch
-the network, never sign, and never move funds. They also assert that no private
-keys / secrets leak into the (simulated) payment output.
+These run with a mocked HTTP transport and, where noted, a mocked or offline
+x402 SDK client. No real network calls, no funds, no real inference.
 """
+
+import asyncio
 import base64
 import json
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import httpx
+import pytest
+
+sys_path = os.path.dirname(os.path.abspath(__file__))
+import sys  # noqa: E402
+
+sys.path.insert(0, sys_path)
 
 import clarity_agent  # noqa: E402
 
@@ -20,6 +26,7 @@ from clarity_agent import (  # noqa: E402
     demo,
 )
 
+# A realistic x402 v2 PAYMENT-REQUIRED header (mirrors what /v1/x402/topup sends).
 FAKE_PR_HEADER = base64.b64encode(
     json.dumps(
         {
@@ -39,19 +46,78 @@ FAKE_PR_HEADER = base64.b64encode(
     ).encode()
 ).decode()
 
+# Value-like markers that should NEVER appear in any output. Descriptive words
+# ("authorization", "bearer", "private") are intentionally excluded so the
+# plan's explanatory text does not trigger false positives.
+SECRET_SUBSTRINGS = [
+    "sk-",
+    "gw_",
+    "x-api-key",
+    "api_key",
+]
 
-def test_discover_reads_public_status():
-    called = {}
 
-    def fake_get(url):
-        called["url"] = url
-        return {"status": "healthy", "providers": {}}
+def _make_transport(calls=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append((request.method, request.url.path, dict(request.headers)))
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/status":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "healthy",
+                    "gateway": {"active_keys": 1, "total_balance_usd": 0.5},
+                },
+            )
+        if request.method == "POST" and path == "/v1/x402/topup":
+            # Unpaid request -> 402 + PAYMENT-REQUIRED (the only x402 challenge).
+            if "PAYMENT-SIGNATURE" not in request.headers:
+                return httpx.Response(
+                    402, headers={"PAYMENT-REQUIRED": FAKE_PR_HEADER}, json={}
+                )
+            # Paid retry -> gateway credit with an skey.
+            return httpx.Response(
+                200, json={"id": "k1", "skey": "gw_test_skey", "balance_usd": 1.0}
+            )
+        if request.method == "POST" and path == "/v1/chat/completions":
+            auth = request.headers.get("Authorization", "")
+            if auth == "Bearer gw_test_skey":
+                return httpx.Response(
+                    200, json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+                )
+            # Insufficient-balance 402: NO PAYMENT-REQUIRED header (not an x402 challenge).
+            return httpx.Response(402, json={"error": "insufficient balance"})
+        return httpx.Response(404)
 
-    d = discover_clarity(base_url="https://gw.test", http_get=fake_get)
-    assert d["base_url"] == "https://gw.test"
-    assert d["status"] == {"status": "healthy", "providers": {}}
-    assert called["url"].endswith("/v1/status")
-    print("PASS discover: reads public /v1/status, no auth")
+    return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def fake_server(monkeypatch):
+    transport = _make_transport()
+    real_client = httpx.Client
+
+    def _client_factory(*a, **k):
+        return real_client(transport=transport)
+
+    monkeypatch.setattr(clarity_agent.httpx, "Client", _client_factory)
+    return transport
+
+
+# ---------------------------------------------------------------------------
+# Discovery + parsing
+# ---------------------------------------------------------------------------
+def test_discover_reads_public_status(fake_server):
+    agent = ClarityAgent()
+    status, data, _ = agent.discover()
+    assert status == 200
+    assert data["status"] == "healthy"
+
+
+def test_discover_module_function(fake_server):
+    data = discover_clarity()
+    assert data["status"] == "healthy"
 
 
 def test_parse_payment_required_header():
@@ -61,168 +127,137 @@ def test_parse_payment_required_header():
     assert pr.asset == "0x036CbD53842c5426634e7929541eC2318f3dCF7E"
     assert pr.amount == "1000"
     assert pr.pay_to == "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f"
-    print("PASS parse: PAYMENT-REQUIRED decoded correctly")
+    assert pr.max_timeout_seconds == 60
 
 
-def test_chat_200_returns_data():
-    def fake_post(url, headers, body):
-        return 200, {"choices": [{"message": {"content": "hi"}}]}, {}
-
-    a = ClarityAgent(base_url="https://gw.test", http_post=fake_post)
-    r = a.chat([{"role": "user", "content": "hi"}])
-    assert r.status == 200
-    assert r.data["choices"][0]["message"]["content"] == "hi"
-    assert r.dry_run_plan is None
-    print("PASS chat: 200 handled, no payment path")
+def test_topup_challenge_returns_402_with_payment_required(fake_server):
+    agent = ClarityAgent()
+    pr, raw, body = agent.topup_challenge()
+    assert pr.scheme == "exact"
+    assert pr.network == "eip155:84532"
+    assert raw == FAKE_PR_HEADER
 
 
-def test_chat_402_dry_run_no_payer():
-    def fake_post(url, headers, body):
-        return 402, "", {"PAYMENT-REQUIRED": FAKE_PR_HEADER}
-
-    a = ClarityAgent(base_url="https://gw.test", payer=None, dry_run=True, http_post=fake_post)
-    r = a.chat([{"role": "user", "content": "hi"}])
-    assert r.status == 402
-    assert r.mode == "dry-run"
-    assert r.payment_required is not None
-    plan = r.dry_run_plan
-    assert plan is not None
-    assert plan.simulated_signature_header.startswith("SIMULATED.")
-    # No payer was supplied -> plan must not embed a payer identity.
-    assert plan.payer is None
-    print("PASS chat 402: dry-run plan produced, no payer, clearly simulated")
+def test_chat_insufficient_balance_returns_plain_402_no_challenge(fake_server):
+    agent = ClarityAgent()
+    status, data, headers = agent._post("/v1/chat/completions", {}, {})
+    assert status == 402
+    assert "PAYMENT-REQUIRED" not in headers  # chat 402 is NOT an x402 challenge
 
 
-def test_chat_402_dry_run_with_payer():
-    def fake_post(url, headers, body):
-        return 402, "", {"PAYMENT-REQUIRED": FAKE_PR_HEADER}
+# ---------------------------------------------------------------------------
+# DRY-RUN
+# ---------------------------------------------------------------------------
+def test_dry_run_shows_simulated_plan_and_no_skey(fake_server):
+    agent = ClarityAgent(dry_run=True)
+    result = asyncio.run(agent.run())
+    assert result["mode"] == "dry-run"
+    assert "dry_run_plan" in result
+    assert result["payment_signed"] is False
+    assert result["skey_present"] is False
+    assert result["inference_verified"] is False
+    sig = result["dry_run_plan"]["simulated_signature"]
+    assert sig.startswith("SIMULATED.")
+    decoded = json.loads(base64.b64decode(sig.split(".", 1)[1]))
+    assert decoded["simulated"] is True
 
-    a = ClarityAgent(
-        base_url="https://gw.test", payer="0xAGENT_DEMO_ADDRESS", dry_run=True, http_post=fake_post
+
+def test_no_secrets_in_dry_run_output(fake_server):
+    agent = ClarityAgent(dry_run=True)
+    result = asyncio.run(agent.run())
+    blob = json.dumps(result).lower()
+    for s in SECRET_SUBSTRINGS:
+        assert s not in blob
+
+
+def test_self_contained_demo_runs_offline(fake_server, capsys):
+    demo()
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "PAYMENT-REQUIRED" not in out or "SIMULATED" in out
+
+
+# ---------------------------------------------------------------------------
+# LIVE (guarded; never spends)
+# ---------------------------------------------------------------------------
+def test_live_requires_env_key(fake_server, monkeypatch):
+    monkeypatch.delenv("X402_PAYER_KEY", raising=False)
+    agent = ClarityAgent(dry_run=False)
+    with pytest.raises(RuntimeError):
+        asyncio.run(agent.run())
+
+
+def test_live_two_endpoint_flow_mocked(monkeypatch):
+    monkeypatch.setenv("X402_PAYER_KEY", "0xdummy_private_key_for_test_only")
+    calls = []
+    transport = _make_transport(calls)
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        clarity_agent.httpx, "Client", lambda *a, **k: real_client(transport=transport)
     )
-    r = a.chat([{"role": "user", "content": "hi"}])
-    assert r.status == 402
-    plan = r.dry_run_plan
-    assert plan.payer == "0xAGENT_DEMO_ADDRESS"
-    # Decoded simulated header must be clearly marked simulated.
-    payload = json.loads(base64.b64decode(plan.simulated_signature_header[len("SIMULATED."):]))
-    assert payload["simulated"] is True
-    assert payload["payTo"] == "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f"
-    print("PASS chat 402: dry-run plan embeds payer, still simulated (no funds)")
 
+    class FakeHTTPClient:
+        async def handle_402_response(self, headers, body):
+            return (
+                {
+                    "PAYMENT-SIGNATURE": "FAKE_SIG",
+                    "Access-Control-Expose-Headers": "PAYMENT-RESPONSE",
+                },
+                {"x402Version": 2},
+            )
 
-def test_no_secrets_in_simulated_output():
-    def fake_post(url, headers, body):
-        return 402, "", {"PAYMENT-REQUIRED": FAKE_PR_HEADER}
+        async def process_payment_result(self, payload, get_header, status):
+            from types import SimpleNamespace
 
-    a = ClarityAgent(
-        base_url="https://gw.test", payer="0xAGENT_DEMO_ADDRESS", dry_run=True, http_post=fake_post
+            return SimpleNamespace(recovered=True)
+
+    monkeypatch.setattr(
+        clarity_agent.ClarityAgent,
+        "_build_client",
+        lambda self, key, net: (FakeHTTPClient(), "0xpayer"),
     )
-    r = a.chat([{"role": "user", "content": "hi"}])
-    blob = json.dumps(r.dry_run_plan.to_dict()).lower()
-    for forbidden in ("sk-", "private", "secret", "gw_", "bearer", "api_key", "x-api-key",
-                     "authorization", "0x036c", "0x42ad"):
-        # allow public addresses only when they are the documented payTo/asset, so
-        # we scope the check to key material words, not public contract addresses.
-        if forbidden in ("0x036c", "0x42ad"):
-            continue
-        assert forbidden not in blob, f"forbidden token '{forbidden}' in dry-run output"
-    print("PASS security: no private-key/secret material in dry-run plan")
+
+    agent = ClarityAgent(dry_run=False)
+    result = asyncio.run(agent.run(model="clarity/local-demo"))
+
+    assert result["mode"] == "live"
+    assert result["payment_signed"] is True
+    assert result["settlement_verified"] is True
+    assert result["gateway_credit_verified"] is True
+    assert result["inference_verified"] is True
+    assert result["chat_status"] == 200
+
+    # chat must have been called with the skey returned by the top-up
+    chat_calls = [c for c in calls if c[1] == "/v1/chat/completions"]
+    assert chat_calls, "chat/completions was never called"
+    sent_auth = chat_calls[0][2].get("Authorization") or chat_calls[0][2].get("authorization")
+    assert sent_auth == "Bearer gw_test_skey"
+
+    # the private key value must never appear in the result
+    assert "0xdummy_private_key_for_test_only" not in json.dumps(result)
 
 
-def test_live_mode_requires_env_key():
-    os.environ.pop("X402_PAYER_KEY", None)
+def test_live_sdk_integration_offline():
+    """Exercise the REAL x402 client SDK offline (no network, no funds).
 
-    def fake_post(url, headers, body):
-        return 402, "", {"PAYMENT-REQUIRED": FAKE_PR_HEADER}
+    The exact/eip3009 scheme signs locally, so a valid PAYMENT-SIGNATURE is
+    produced without any facilitator or on-chain interaction.
+    """
+    from eth_account import Account
+    from x402 import x402Client
+    from x402.http.x402_http_client import x402HTTPClient
+    from x402.mechanisms.evm.exact import ExactEvmScheme
 
-    a = ClarityAgent(base_url="https://gw.test", dry_run=False, http_post=fake_post)
-    # Live mode must refuse to sign/spend unless X402_PAYER_KEY is supplied.
-    try:
-        a.chat([{"role": "user", "content": "hi"}], path="/v1/x402/topup")
-        assert False, "live chat should raise without X402_PAYER_KEY"
-    except RuntimeError as e:
-        assert "X402_PAYER_KEY" in str(e)
-    print("PASS live-mode guard: refuses without X402_PAYER_KEY (no sign/spend)")
+    acct = Account.create()
+    scheme = ExactEvmScheme(acct)
+    client = x402Client()
+    client.register("eip155:84532", scheme)
+    hc = x402HTTPClient(client)
 
-
-def test_live_signing_retry_mocked(monkeypatch):
-    # Valid-format key is set but NEVER used: the SDK bits are mocked, so no real
-    # signing or funds occur. This exercises the full live state machine.
-    os.environ["X402_PAYER_KEY"] = "0x" + "11" * 32
-
-    def fake_post(url, headers, body):
-        if "PAYMENT-SIGNATURE" in headers:
-            resp = base64.b64encode(json.dumps(
-                {"success": True, "transaction": "0xTX", "network": "eip155:84532", "payer": "0xpayer"}
-            ).encode()).decode()
-            return 200, {"id": "k", "skey": "gw_fake", "balance_usd": 0.001}, {"PAYMENT-RESPONSE": resp}
-        return 402, "", {"PAYMENT-REQUIRED": FAKE_PR_HEADER}
-
-    def fake_build_client(payer_key):
-        return object(), "0xpayeraddress"
-
-    async def fake_sign(client, pr_sdk, url):
-        return "SIMULATED_LIVE." + base64.b64encode(json.dumps({"signed": True}).encode()).decode()
-
-    monkeypatch.setattr(clarity_agent, "_build_client", fake_build_client)
-    monkeypatch.setattr(clarity_agent, "_sign_payment", fake_sign)
-
-    a = ClarityAgent(base_url="https://gw.test", dry_run=False, http_post=fake_post)
-    r = a.chat([{"role": "user", "content": "hi"}], path="/v1/x402/topup")
-    assert r.mode == "live"
-    live = r.data
-    assert live.payment_signed is True
-    assert live.settlement_verified is True
-    assert live.gateway_credit_verified is True
-    assert live.payment_response["transaction"] == "0xTX"
-    # no private key material anywhere in the live result
-    assert "X402_PAYER_KEY" not in json.dumps(live.__dict__).lower()
-    assert "11" * 32 not in json.dumps(live.__dict__)
-    print("PASS live signing/retry (mocked): signed+settled+credited, no real funds")
-
-
-def test_live_sdk_signing_integration_mocked(monkeypatch):
-    # Use the REAL x402 client + signer construction, but mock only the network
-    # signing round-trip, proving the SDK integration path is correct.
-    os.environ["X402_PAYER_KEY"] = "0x" + "22" * 32
-
-    import x402
-
-    class FakePayload:
-        def model_dump(self, mode="json"):
-            return {"x402_version": 2, "payload": {"signature": "0xsig"}, "accepted": {}, "resource": {}}
-
-    async def fake_create(self, payment_required, resource=None):
-        return FakePayload()
-
-    monkeypatch.setattr(x402.x402Client, "create_payment_payload", fake_create)
-
-    def fake_post(url, headers, body):
-        if "PAYMENT-SIGNATURE" in headers:
-            resp = base64.b64encode(json.dumps(
-                {"success": True, "transaction": "0xREALTX"}
-            ).encode()).decode()
-            return 200, {"id": "k", "skey": "gw_x"}, {"PAYMENT-RESPONSE": resp}
-        return 402, "", {"PAYMENT-REQUIRED": FAKE_PR_HEADER}
-
-    a = ClarityAgent(base_url="https://gw.test", dry_run=False, http_post=fake_post)
-    r = a.chat([{"role": "user", "content": "hi"}], path="/v1/x402/topup")
-    assert r.mode == "live"
-    assert r.data.payment_signed is True
-    assert r.data.settlement_verified is True
-    assert r.data.gateway_credit_verified is True
-    print("PASS live SDK integration (mocked network): x402 client used, no real funds")
-
-
-def test_self_contained_demo_runs_offline():
-    out = demo()
-    assert out["chat_status"] == 402
-    assert out["mode"] == "dry-run"
-    assert out["plan"]["mode"] == "dry-run"
-    assert out["plan"]["retry_header"]["PAYMENT-SIGNATURE"].startswith("SIMULATED.")
-    assert "no funds moved" in out["plan"]["note"].lower()
-    print("PASS demo: full discovery + 402 + simulated retry runs offline, no funds")
-
-
-print("ALL AGENT SDK EXAMPLE TESTS PASSED")
+    headers, payload = asyncio.run(
+        hc.handle_402_response({"PAYMENT-REQUIRED": FAKE_PR_HEADER}, b"")
+    )
+    assert "PAYMENT-SIGNATURE" in headers
+    decoded = json.loads(base64.b64decode(headers["PAYMENT-SIGNATURE"]))
+    assert decoded["x402Version"] == 2
+    assert decoded["payload"]["authorization"]["from"].lower() == acct.address.lower()
