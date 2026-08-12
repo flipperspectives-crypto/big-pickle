@@ -150,3 +150,17 @@ def needs_key(provider: str) -> bool:
     if provider == "huggingface":
         return bool(settings.HF_KEY)
     return True
+
+
+def has_credentials(provider: str) -> bool:
+    """Whether the gateway holds the credential needed to use this provider.
+
+    Local Ollama and key-optional providers (e.g. Hugging Face when no key is
+    set) are considered usable without a stored credential, so they return True.
+    Providers that require a key return True only if that key env var is set.
+    """
+    if provider == "local":
+        return True
+    if needs_key(provider):
+        return bool(settings.provider_key(provider))
+    return True

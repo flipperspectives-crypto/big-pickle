@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import json
-from datetime import datetime, timezone
 
 import os
 
@@ -18,7 +17,6 @@ from .db import (
     add_credits,
     balance_for,
     create_key,
-    gateway_status,
     get_key,
     init_db,
     is_charged,
@@ -28,6 +26,7 @@ from .db import (
     usage_all,
     usage_for,
 )
+from .status import build_status
 from .router import UpstreamError, available_models, run_completion
 
 app = FastAPI(title="Clarity", version="0.1.0")
@@ -199,41 +198,16 @@ async def health():
 async def status():
     """Public, read-only reliability/status surface.
 
-    Reports only evidence-backed runtime information:
-      - gateway health (DB-backed active key count + total balance)
-      - each configured provider's availability (needs_key is a config fact,
-        not an inference probe)
-      - provider model coverage derived from the existing ROUTES table
-    No API keys, secrets, internal tokens, private host info, or sensitive
-    error bodies are returned. No uptime percentages or probe latencies are
-    invented; fields that are not actually measured are clearly noted.
+    Delegates to :func:`app.status.build_status`, which reports clearly
+    separated, evidence-backed facts per provider: ``configured``,
+    ``credentials_configured``, ``reachable`` (live zero-cost probe),
+    ``probe_latency_ms``, and ``models_in_routes``. No API keys, secrets,
+    internal tokens, private host info, or raw upstream error bodies are
+    returned; unreachable/unknown providers are represented honestly
+    (``reachable: false`` or ``null`` with a reason). No uptime percentages or
+    historical statistics are invented.
     """
-    gw = gateway_status()
-    all_providers = (
-        set(providers.OPENAI_COMPATIBLE)
-        | set(providers.ANTHROPIC)
-        | {p for provs in providers.ROUTES.values() for p in provs}
-    )
-    providers_summary = {}
-    for pname in sorted(all_providers):
-        providers_summary[pname] = {
-            "needs_key": providers.needs_key(pname),
-            "configured_models": sum(
-                1 for provs in providers.ROUTES.values() if pname in provs
-            ),
-        }
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "gateway": gw,
-        "providers": providers_summary,
-        "recent_activity": {
-            "note": "no external probe latency recorded in this session; measurement infrastructure not wired"
-        },
-        "failover": {
-            "note": "failover events are tested via mocked providers (test_failover.py); no real-time events recorded without inference"
-        },
-    }
+    return await build_status()
 
 
 @app.post("/v1/x402/topup")
