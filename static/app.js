@@ -1,4 +1,4 @@
-/* Big Pickle — gateway frontend. All data comes from the live backend. */
+/* Clarity — gateway frontend. All data comes from the live backend. */
 (function () {
   "use strict";
 

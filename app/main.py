@@ -27,7 +27,7 @@ from .db import (
 )
 from .router import UpstreamError, available_models, run_completion
 
-app = FastAPI(title="Big Pickle", version="0.1.0")
+app = FastAPI(title="Clarity", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,7 +46,7 @@ if os.path.isdir(_STATIC):
 @app.get("/")
 async def index():
     index = os.path.join(_STATIC, "index.html")
-    return FileResponse(index) if os.path.exists(index) else {"name": "Big Pickle Gateway", "docs": "/docs"}
+    return FileResponse(index) if os.path.exists(index) else {"name": "Clarity Gateway", "docs": "/docs"}
 
 
 class KeyRequest(BaseModel):

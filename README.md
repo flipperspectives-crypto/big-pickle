@@ -1,10 +1,10 @@
 [![Sponsor](https://img.shields.io/badge/Sponsor-❤%20flipperspectives-2ecc71)](https://github.com/sponsors/flipperspectives-crypto)
 
-# Big Pickle
+# Clarity
 
 One API. Every model. Prepaid credits, automatic failover, and free local inference.
 
-Big Pickle is an OpenAI-compatible inference gateway. Customers get one API key and prepaid credits; the gateway
+Clarity is an OpenAI-compatible inference gateway. Customers get one API key and prepaid credits; the gateway
 routes each request across multiple providers (Groq, Cerebras, OpenAI, Anthropic, DeepInfra, Together, Fireworks,
 Hugging Face, OpenRouter — plus any local Ollama models at $0) and transparently fails over when a provider is down.
 Usage is metered per token and deducted from the customer's credit balance.
