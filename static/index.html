@@ -344,6 +344,17 @@ curl <span class="hl" id="curl-base-url">…</span> \
         <p class="lm-status-line" id="local-models-status">Checking local Ollama…</p>
         <div class="lm-grid" id="local-models-list" role="list" aria-label="Local models"></div>
       </div>
+
+      <div class="local-runtime" id="local-runtime-panel" aria-labelledby="lrt-title">
+        <div class="lm-head-row">
+          <h3 id="lrt-title">Local Runtime</h3>
+          <button class="btn btn-sm btn-ghost" type="button" id="local-runtime-refresh" aria-label="Refresh local runtime">Refresh Runtime</button>
+        </div>
+        <p class="lm-status-line" id="local-runtime-status">Checking local Ollama runtime…</p>
+        <div class="lm-grid" id="local-runtime-list" role="list" aria-label="Loaded local models"></div>
+        <div class="lrt-last" id="local-runtime-last" aria-live="polite"></div>
+        <p class="lrt-note">Round-trip is measured by Clarity around the local upstream request; it is not Ollama model-eval time.</p>
+      </div>
     </div>
   </section>
 

@@ -86,6 +86,15 @@
     useInPlayground: useInPlayground,
     refreshLocalModels: refreshLocalModels,
     renderLocalModels: renderLocalModels,
+    setLocalRuntime: function (data) {
+      RUNTIME_DATA = (data && typeof data === "object") ? data : { status: "unavailable", models: [] };
+      renderLocalRuntime();
+    },
+    getRuntimeData: function () { return RUNTIME_DATA; },
+    refreshLocalRuntime: refreshLocalRuntime,
+    renderLocalRuntime: renderLocalRuntime,
+    humanBytes: humanBytes,
+    vramShare: vramShare,
     PG_STATE_LABELS: PG_STATE_LABELS
   };
 
@@ -419,8 +428,115 @@
   })();
 
   /* =========================================================================
-     Model selector (combobox)
-     ========================================================================= */
+      Local Runtime panel (zero-inference /api/ps surface + last request)
+      ========================================================================= */
+  // Last local runtime payload from GET /v1/local/runtime (in memory only).
+  var RUNTIME_DATA = null;
+
+  // VRAM share = size_vram_bytes / size_bytes. This is explicitly NOT a
+  // GPU-utilization / CPU-GPU-split / GPU-usage figure; it is only the
+  // proportion of the model footprint that is resident in VRAM.
+  function vramShare(m) {
+    if (typeof m.size_vram_bytes === "number" && m.size_vram_bytes > 0 &&
+        typeof m.size_bytes === "number" && m.size_bytes > 0) {
+      return m.size_vram_bytes / m.size_bytes;
+    }
+    return null;
+  }
+
+  function renderLocalRuntimeLast(last) {
+    var box = el("local-runtime-last");
+    if (!box) return;
+    if (!last) {
+      box.hidden = false;
+      box.innerHTML =
+        '<div class="lrt-last-head">Last Local Request</div>' +
+        '<div class="degraded">No successful local request measured yet.</div>';
+      return;
+    }
+    box.hidden = false;
+    var rows = "";
+    function row(k, v) { return '<div class="lm-row"><span class="lm-k">' + k + '</span><span class="lm-v">' + v + "</span></div>"; }
+    rows += row("Model", escapeHtml(last.model));
+    rows += row("Clarity upstream round-trip",
+      (typeof last.gateway_upstream_round_trip_ms === "number"
+        ? last.gateway_upstream_round_trip_ms.toFixed(1) : "—") + " ms");
+    rows += row("Prompt tokens", String(last.prompt_tokens));
+    rows += row("Completion tokens", String(last.completion_tokens));
+    rows += row("Total tokens", String(last.total_tokens));
+    if (last.measured_at) rows += row("Measured at", escapeHtml(String(last.measured_at)));
+    box.innerHTML =
+      '<div class="lrt-last-head">Last Local Request</div>' +
+      '<div class="lm-rows">' + rows + "</div>";
+  }
+
+  function renderLocalRuntime() {
+    var panel = el("local-runtime-list");
+    var statusLine = el("local-runtime-status");
+    if (!panel) return;
+    renderLocalRuntimeLast(RUNTIME_DATA && RUNTIME_DATA.last_local_request);
+
+    var data = RUNTIME_DATA || { status: "unavailable", models: [] };
+    if (data.status !== "ok") {
+      if (statusLine) statusLine.textContent = "Local runtime unavailable — Ollama could not be reached.";
+      panel.innerHTML = '<div class="degraded">Local runtime unavailable. Check that your Ollama host is connected to the gateway, then press <b>Refresh Runtime</b>.</div>';
+      return;
+    }
+    var models = Array.isArray(data.models) ? data.models : [];
+    if (!models.length) {
+      if (statusLine) statusLine.textContent = "Runtime available — no models loaded.";
+      panel.innerHTML = '<div class="degraded">Runtime available, but no models are currently loaded into VRAM. Send a request to a local model to load it.</div>';
+      return;
+    }
+    if (statusLine) statusLine.textContent = models.length + " model" + (models.length > 1 ? "s" : "") + " loaded into VRAM.";
+    var html = "";
+    models.forEach(function (m) {
+      var rows = "";
+      function row(k, v) { return '<div class="lm-row"><span class="lm-k">' + k + '</span><span class="lm-v">' + v + "</span></div>"; }
+      var size = humanBytes(m.size_bytes);
+      if (size) rows += row("Model size", size);
+      var vram = humanBytes(m.size_vram_bytes);
+      if (vram) rows += row("VRAM", vram);
+      var share = vramShare(m);
+      if (share !== null) rows += row("VRAM share", Math.round(share * 100) + "%");
+      if (m.parameter_size) rows += row("Parameters", escapeHtml(m.parameter_size));
+      if (m.quantization_level) rows += row("Quantization", escapeHtml(m.quantization_level));
+      if (m.family) rows += row("Family", escapeHtml(m.family));
+      if (m.context_length) rows += row("Allocated context", escapeHtml(String(m.context_length)) + " tokens");
+      if (m.expires_at) rows += row("Unload at", escapeHtml(String(m.expires_at)));
+
+      html +=
+        '<div class="lm-card" role="listitem">' +
+          '<div class="lm-head">' +
+            '<div class="lm-name">' + escapeHtml(m.id) + "</div>" +
+            '<span class="chip local tag loaded">LOADED</span>' +
+          "</div>" +
+          (rows ? '<div class="lm-rows">' + rows + "</div>" : "") +
+        "</div>";
+    });
+    panel.innerHTML = html;
+  }
+
+  async function refreshLocalRuntime() {
+    RUNTIME_DATA = { status: "unavailable", models: [] };
+    try {
+      var r = await fetch(API_BASE + "/local/runtime", { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      RUNTIME_DATA = await r.json();
+    } catch (e) {
+      // Keep the honest unavailable view; the backend reports status honestly.
+    }
+    renderLocalRuntime();
+  }
+
+  (function wireLocalRuntime() {
+    var rtRefresh = el("local-runtime-refresh");
+    if (rtRefresh) rtRefresh.addEventListener("click", refreshLocalRuntime);
+  })();
+
+  /* =========================================================================
+      Model selector (combobox)
+      ========================================================================= */
   var trigger = el("pg-model-trigger");
   var menu = el("pg-model-menu");
   var search = el("pg-model-search");
@@ -916,4 +1032,5 @@
   checkHealth();
   loadModels();
   loadStatus();
+  refreshLocalRuntime();
 })();

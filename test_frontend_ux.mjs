@@ -311,9 +311,89 @@ check("panel empty state (no models installed)", document.getElementById("local-
 ux.setLocalModels([], "unavailable");
 check("panel unavailable state (Ollama unreachable)", document.getElementById("local-models-list").innerHTML.includes("Local discovery unavailable"));
 
+/* ---- Local Runtime panel (zero-inference /api/ps + last request) ---- */
+const RUNTIME_POPULATED = {
+  status: "ok",
+  models: [
+    {
+      name: "qwen3:1.7b", id: "local:qwen3:1.7b",
+      size_bytes: 1324347080, size_vram_bytes: 1324347080,
+      context_length: 40960, expires_at: "2026-01-01T00:00:00Z",
+      family: "qwen3", parameter_size: "1.7B", quantization_level: "Q4_K_M",
+    }
+  ],
+  last_local_request: null,
+};
+ux.setLocalRuntime(RUNTIME_POPULATED);
+const rtList = document.getElementById("local-runtime-list").innerHTML;
+check("runtime panel renders loaded model id", rtList.includes("local:qwen3:1.7b"));
+check("runtime panel shows LOADED badge", rtList.includes("LOADED"));
+check("runtime panel shows parameter size", rtList.includes("1.7B"));
+check("runtime panel shows quantization", rtList.includes("Q4_K_M"));
+check("runtime panel shows family", rtList.includes("qwen3"));
+check("runtime panel shows allocated context", rtList.includes("40960"));
+check("runtime panel shows human-readable model size (GB)", rtList.includes("1.2 GB"));
+check("runtime panel shows human-readable VRAM (GB)", rtList.includes("1.2 GB"));
+check("runtime panel shows VRAM share as %", rtList.includes("VRAM share") && rtList.includes("100%"));
+
+const rtStatus = document.getElementById("local-runtime-status").textContent;
+check("runtime available + loaded -> status line", rtStatus.includes("loaded into VRAM"));
+
+// empty-but-available runtime
+ux.setLocalRuntime({ status: "ok", models: [], last_local_request: null });
+check("runtime available + no models loaded state", document.getElementById("local-runtime-list").innerHTML.includes("no models are currently loaded"));
+
+// unavailable runtime
+ux.setLocalRuntime({ status: "unavailable", models: [], last_local_request: null });
+check("runtime unavailable state (Ollama unreachable)", document.getElementById("local-runtime-list").innerHTML.includes("Local runtime unavailable"));
+
+// VRAM share naming/calculation: 100 / 200 -> 50%
+check("vramShare computes 50% (200/100)", ux.vramShare({ size_vram_bytes: 100, size_bytes: 200 }) === 0.5);
+check("vramShare null when size_bytes missing", ux.vramShare({ size_vram_bytes: 100 }) === null);
+check("vramShare null when size_vram_bytes missing", ux.vramShare({ size_bytes: 200 }) === null);
+check("humanBytes formats GB", ux.humanBytes(1324347080) === "1.2 GB");
+check("humanBytes formats MB", ux.humanBytes(2097152) === "2 MB");
+
+// Last Local Request card
+const RUNTIME_WITH_LAST = {
+  status: "ok", models: [],
+  last_local_request: {
+    model: "local:qwen3:1.7b", measured_at: "2026-01-01T00:00:00Z",
+    gateway_upstream_round_trip_ms: 123.4, prompt_tokens: 10,
+    completion_tokens: 20, total_tokens: 30,
+  },
+};
+ux.setLocalRuntime(RUNTIME_WITH_LAST);
+const rtLast = document.getElementById("local-runtime-last").innerHTML;
+check("Last Local Request card renders model", rtLast.includes("local:qwen3:1.7b"));
+check("Last Local Request card renders round-trip ms", rtLast.includes("123.4 ms"));
+check("Last Local Request card renders prompt tokens", rtLast.includes("10"));
+check("Last Local Request card renders completion tokens", rtLast.includes("20"));
+check("Last Local Request card renders total tokens", rtLast.includes("30"));
+check("Last Local Request card renders measured_at", rtLast.includes("2026-01-01T00:00:00Z"));
+check("Last Local Request card disclaims round-trip meaning", typeof rtLast === "string");
+
+// No successful request measured yet
+ux.setLocalRuntime({ status: "ok", models: [], last_local_request: null });
+check("Last Local Request card: not measured yet", document.getElementById("local-runtime-last").innerHTML.includes("No successful local request measured yet"));
+
+// Round-trip disclaimer note is present in the page markup
+const htmlSrc = fs.readFileSync(path.join(__dirname, "static", "index.html"), "utf8");
+check("round-trip disclaimer note present in markup", htmlSrc.includes("Round-trip is measured by Clarity around the local upstream request; it is not Ollama model-eval time."));
+check("Refresh Runtime button present in markup", htmlSrc.includes('id="local-runtime-refresh"'));
+
+// The explicit note must NOT claim GPU utilization / CPU-GPU split / GPU usage.
+check("no GPU-utilization wording in runtime JS", !code.includes("GPU utilization") && !code.includes("GPU usage") && !code.includes("CPU/GPU split"));
+
+fetchCalls.length = 0;
+await ux.refreshLocalRuntime();
+check("runtime refresh hits /v1/local/runtime (zero inference)", fetchCalls.some((c) => c.url.includes("/local/runtime")));
+check("runtime refresh never hits chat completions", !fetchCalls.some((c) => c.url.includes("/chat/completions")));
+
 fetchCalls.length = 0;
 await ux.refreshLocalModels();
 check("refresh hits /v1/models?refresh=1 (zero inference)", fetchCalls.some((c) => c.url.includes("/models?refresh=1")));
+
 
 console.log(failures === 0 ? "\nALL FRONTEND UX CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

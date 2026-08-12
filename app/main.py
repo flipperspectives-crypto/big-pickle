@@ -11,7 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import providers, x402, local
+from . import providers, x402, local, runtime
 from .config import settings
 from .db import (
     add_credits,
@@ -270,6 +270,25 @@ async def admin_usage(x_admin_key: str | None = Header(None)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/v1/local/runtime")
+async def local_runtime(response: Response = None):
+    """Local Ollama runtime surface (zero-inference).
+
+    Probes ``GET /api/ps`` behind an independent short-lived cache + async lock
+    (separate from the ``/api/tags`` discovery cache that powers ``/v1/models``).
+    Returns the running (loaded) local models with only sanitized, public fields
+    plus the most recent successful non-streaming local request telemetry. Only
+    public runtime facts are exposed — never OLLAMA_BASE_URL, hosts, IPs,
+    filesystem paths, raw payloads, headers, credentials, or internal URLs.
+    """
+    if response is not None:
+        # Live, per-request runtime/telemetry surface: never let a browser or
+        # proxy cache it (the frontend also fetches with cache: "no-store").
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return await runtime.get_runtime()
 
 
 @app.get("/v1/status")

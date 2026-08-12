@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 
@@ -6,6 +7,7 @@ from . import providers
 from .config import settings
 from .db import record_usage
 from .local import local_model_ids
+from . import runtime
 
 _ERR_MARKER = "\x00GWERR\x00"
 
@@ -230,6 +232,7 @@ async def run_completion(body: dict, key_id: str):
         raise UpstreamError(404, f"no provider for model {model}")
 
     last_err: UpstreamError | None = None
+    local_rt = False
     async with httpx.AsyncClient() as client:
         for provider in providers_list:
             try:
@@ -238,12 +241,24 @@ async def run_completion(body: dict, key_id: str):
                     result = await _chat_anthropic(client, provider, payload)
                 else:
                     payload = _openai_payload(body, provider)
-                    result = await _chat_openai(client, provider, payload, stream)
+                    if provider == "local" and not stream:
+                        # Measure the Clarity-side round-trip around the ACTUAL
+                        # local upstream request for non-streaming local success.
+                        # Telemetry is recorded only on success; a failed/streaming
+                        # or cloud request never populates local telemetry.
+                        rt_start = time.monotonic()
+                        result = await _chat_openai(client, provider, payload, stream)
+                        rt_ms = (time.monotonic() - rt_start) * 1000.0
+                        local_rt = True
+                    else:
+                        result = await _chat_openai(client, provider, payload, stream)
 
                 if not stream:
                     data, pt, ct = result
                     cost = providers.price_for(provider, payload["model"], pt, ct)
                     record_usage(key_id, model, provider, pt, ct, cost)
+                    if local_rt:
+                        runtime.record_local_success(model, rt_ms, pt, ct)
                     return data, cost, provider
                 gen, provider_used, upstream_model = result
 

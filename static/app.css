@@ -1159,3 +1159,39 @@ section { scroll-margin-top: 96px; }
   .routing-anim .routing-packet { animation: none; opacity: 0.7; left: 50%; }
   .status-dot.ok { animation: none; }
 }
+
+/* ============================================================
+   Local Runtime panel (zero-inference /api/ps surface)
+   Reuses the Local Models visual language for a consistent look.
+   ============================================================ */
+.local-runtime {
+  margin-top: 36px;
+  padding-top: 36px;
+  border-top: 1px solid var(--border);
+}
+/* LOADED badge — a runtime-only state distinct from the discovery "Ready". */
+.chip.local.tag.loaded {
+  background: rgba(114, 216, 155, 0.14);
+  border-color: rgba(114, 216, 155, 0.42);
+  color: var(--success);
+}
+.lrt-last {
+  margin-top: 22px;
+  padding: 16px 18px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.lrt-last-head {
+  font: 600 13px var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin-bottom: 12px;
+}
+.lrt-note {
+  margin: 18px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
