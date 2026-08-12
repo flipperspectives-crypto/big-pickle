@@ -263,5 +263,57 @@ const legacyLocalBody = ux.buildChatBody("local/mistral-7b", "hi");
 check("other local model unchanged (no reasoning_effort)", legacyLocalBody.reasoning_effort === undefined);
 check("body shape preserved (model + messages + content)", qwenBody.model === "local:qwen3:1.7b" && Array.isArray(qwenBody.messages) && qwenBody.messages[0].role === "user" && qwenBody.messages[0].content === "hi");
 
+/* ---- Qwen3 Thinking toggle (request source only) ---- */
+const onBody = (ux.setThinking(true), ux.buildChatBody("local:qwen3:1.7b", "hi"));
+check("Qwen3 Thinking ON omits reasoning_effort", onBody.reasoning_effort === undefined);
+const offBody = (ux.setThinking(false), ux.buildChatBody("local:qwen3:1.7b", "hi"));
+check("Qwen3 Thinking OFF restores reasoning_effort=none", offBody.reasoning_effort === "none");
+const onCloud = (ux.setThinking(true), ux.buildChatBody("openai/gpt-4o", "hi"));
+check("cloud model never gains reasoning_effort from toggle", onCloud.reasoning_effort === undefined);
+const onOtherLocal = (ux.setThinking(true), ux.buildChatBody("local/llama-3-8b", "hi"));
+check("non-Qwen local model never gains reasoning_effort from toggle", onOtherLocal.reasoning_effort === undefined);
+ux.setThinking(false);
+
+/* ---- Local Models control panel (read-only, no real inference) ---- */
+ux.setLocalModels([
+  {
+    id: "local:qwen3:1.7b", local: true, providers: ["local"],
+    details: {
+      size_bytes: 1324347080, family: "qwen3", parameter_size: "1.7B",
+      quantization_level: "Q4_K_M", context_length: 40960,
+      capabilities: ["completion", "tools", "thinking"]
+    }
+  }
+], "ok");
+const lm = document.getElementById("local-models-list").innerHTML;
+check("Local Models panel renders qwen3:1.7b", lm.includes("local:qwen3:1.7b"));
+check("panel shows LOCAL · $0 badge", lm.includes("LOCAL · $0"));
+check("panel renders parameter size", lm.includes("1.7B"));
+check("panel renders quantization", lm.includes("Q4_K_M"));
+check("panel renders context length", lm.includes("40960"));
+check("panel renders Completion capability", lm.includes("Completion"));
+check("panel renders Tools capability", lm.includes("Tools"));
+check("panel renders Thinking capability", lm.includes("Thinking"));
+check("panel shows Ready status", lm.includes("Ready"));
+
+ux.setLocalModels([
+  { id: "local:tiny:latest", local: true, providers: ["local"], details: { size_bytes: 123456 } }
+], "ok");
+const lm2 = document.getElementById("local-models-list").innerHTML;
+check("panel omits missing optional metadata", !lm2.includes("Q4_K_M") && !lm2.includes("40960") && lm2.includes("123456"));
+
+ux.setLocalModels([{ id: "local:qwen3:1.7b", local: true, providers: ["local"], details: {} }], "ok");
+ux.useInPlayground("local:qwen3:1.7b");
+check("Use in Playground selects exact model (single source of truth)", ux.getSelectedModel() === "local:qwen3:1.7b");
+
+ux.setLocalModels([], "ok");
+check("panel empty state (no models installed)", document.getElementById("local-models-list").innerHTML.includes("No local models installed"));
+ux.setLocalModels([], "unavailable");
+check("panel unavailable state (Ollama unreachable)", document.getElementById("local-models-list").innerHTML.includes("Local discovery unavailable"));
+
+fetchCalls.length = 0;
+await ux.refreshLocalModels();
+check("refresh hits /v1/models?refresh=1 (zero inference)", fetchCalls.some((c) => c.url.includes("/models?refresh=1")));
+
 console.log(failures === 0 ? "\nALL FRONTEND UX CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

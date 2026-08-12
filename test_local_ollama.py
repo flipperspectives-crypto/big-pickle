@@ -46,6 +46,7 @@ def _save_state():
         "success_models": local_mod._success_cache["models"],
         "success_time": local_mod._success_cache["time"],
         "failure_time": local_mod._failure_time,
+        "last_status": local_mod._last_status,
         "ttl": local_mod.DISCOVERY_CACHE_TTL,
         "fttl": local_mod.FAILURE_TTL,
     }
@@ -59,14 +60,28 @@ def _restore_state(s):
     local_mod._success_cache["models"] = s["success_models"]
     local_mod._success_cache["time"] = s["success_time"]
     local_mod._failure_time = s["failure_time"]
+    local_mod._last_status = s["last_status"]
     local_mod.DISCOVERY_CACHE_TTL = s["ttl"]
     local_mod.FAILURE_TTL = s["fttl"]
     status_mod.clear_status_cache()
 
 
 def _fake_fetch(tags):
+    # _fetch_tags now returns sanitized per-model dicts (each with "name"/"id").
+    # Allow callers to pass either plain tag strings or full metadata dicts.
+    norm = []
+    for t in tags:
+        if isinstance(t, dict):
+            d = dict(t)
+            if d.get("id") is None and d.get("name"):
+                d["id"] = "local:" + d["name"]
+            elif d.get("name") is None and isinstance(d.get("id"), str) and d["id"].startswith("local:"):
+                d["name"] = d["id"][len("local:"):]
+            norm.append(d)
+        else:
+            norm.append({"name": t, "id": "local:" + t})
     async def _f():
-        return list(tags)
+        return list(norm)
     return _f
 
 
@@ -215,7 +230,7 @@ def test_cache_prevents_burst():
 
         async def counting():
             calls["n"] += 1
-            return ["qwen3:1.7b"]
+            return [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
 
         local_mod._fetch_tags = counting
         local_mod.clear_local_cache()
@@ -300,7 +315,7 @@ def test_failure_not_60s_cached_and_recovers_fast():
         async def flaky():
             if holder["mode"] == "fail":
                 raise local_mod.DiscoveryError("down")
-            return ["qwen3:1.7b"]
+            return [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
 
         local_mod._fetch_tags = flaky
         # 1) failure -> closed, success cache untouched
@@ -343,7 +358,7 @@ def test_success_caches_normally():
 
         async def counting():
             calls["n"] += 1
-            return ["qwen3:1.7b"]
+            return [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
 
         local_mod._fetch_tags = counting
         for _ in range(4):
@@ -365,7 +380,7 @@ def test_concurrent_refreshes_deduplicated():
         async def slow_counting():
             calls["n"] += 1
             await asyncio.sleep(0.05)
-            return ["qwen3:1.7b"]
+            return [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
 
         local_mod._fetch_tags = slow_counting
 
@@ -393,6 +408,344 @@ def test_models_endpoint_no_store_headers():
         assert "max-age=0" in cc, cc
         assert r.headers.get("pragma", "").lower() == "no-cache", r.headers.get("pragma")
         print("PASS /v1/models sends Cache-Control: no-store, Pragma: no-cache")
+    finally:
+        _restore_state(s)
+
+
+# ---------------------------------------------------------------------------
+# Local model metadata enrichment (Phase 1/2)
+# ---------------------------------------------------------------------------
+FULL_META = [
+    {
+        "name": "qwen3:1.7b",
+        "id": "local:qwen3:1.7b",
+        "size_bytes": 1324347080,
+        "family": "qwen3",
+        "parameter_size": "1.7B",
+        "quantization_level": "Q4_K_M",
+        "context_length": 40960,
+        "capabilities": ["completion", "tools", "thinking"],
+    },
+    {
+        "name": "llama3.2:3b",
+        "id": "local:llama3.2:3b",
+        "size_bytes": 2097152000,
+        "family": "llama3.2",
+        "parameter_size": "3B",
+        "quantization_level": "Q4_0",
+        "context_length": 8192,
+        "capabilities": ["completion"],
+    },
+]
+
+
+def test_metadata_sanitized_into_expected_fields():
+    s = _save_state()
+    try:
+        local_mod._fetch_tags = _fake_fetch(FULL_META)
+        local_mod.clear_local_cache()
+        r = client.get("/v1/models")
+        assert r.status_code == 200
+        by_id = {m["id"]: m for m in r.json()["data"]}
+        q = by_id["local:qwen3:1.7b"]
+        assert q["local"] is True
+        d = q["details"]
+        assert d["size_bytes"] == 1324347080
+        assert d["family"] == "qwen3"
+        assert d["parameter_size"] == "1.7B"
+        assert d["quantization_level"] == "Q4_K_M"
+        assert d["context_length"] == 40960
+        assert d["capabilities"] == ["completion", "tools", "thinking"]
+        # llama variant keeps only what Ollama reported
+        l = by_id["local:llama3.2:3b"]["details"]
+        assert l["capabilities"] == ["completion"]
+        print("PASS local metadata sanitized into expected fields")
+    finally:
+        _restore_state(s)
+
+
+# ---------------------------------------------------------------------------
+# Capabilities MUST come from Ollama (never invented / family-inferred)
+# ---------------------------------------------------------------------------
+def _details_by_id():
+    r = client.get("/v1/models")
+    return {m["id"]: m for m in r.json()["data"]}
+
+
+def test_capabilities_preserved_exactly_from_ollama_qwen3():
+    s = _save_state()
+    try:
+        # _fetch_tags returns flat per-model dicts (as _sanitize_model does).
+        local_mod._fetch_tags = _fake_fetch([{
+            "name": "qwen3:1.7b", "id": "local:qwen3:1.7b",
+            "family": "qwen3",
+            "capabilities": ["completion", "tools", "thinking"],
+        }])
+        local_mod.clear_local_cache()
+        caps = _details_by_id()["local:qwen3:1.7b"]["details"]["capabilities"]
+        assert caps == ["completion", "tools", "thinking"], caps
+        print("PASS Qwen3 capabilities preserved exactly from Ollama")
+    finally:
+        _restore_state(s)
+
+
+def test_non_qwen_thinking_capability_preserved():
+    s = _save_state()
+    try:
+        # DeepSeek reports thinking; it must NOT be suppressed for being non-Qwen3.
+        local_mod._fetch_tags = _fake_fetch([{
+            "name": "deepseek-r1:7b", "id": "local:deepseek-r1:7b",
+            "family": "deepseek-r1",
+            "capabilities": ["completion", "thinking"],
+        }])
+        local_mod.clear_local_cache()
+        caps = _details_by_id()["local:deepseek-r1:7b"]["details"]["capabilities"]
+        assert caps == ["completion", "thinking"], caps
+        print("PASS non-Qwen thinking capability preserved (not suppressed)")
+    finally:
+        _restore_state(s)
+
+
+def test_missing_capabilities_omitted():
+    s = _save_state()
+    try:
+        local_mod._fetch_tags = _fake_fetch([{
+            "name": "plain:1", "id": "local:plain:1",
+            "family": "plain",  # no capabilities key
+        }])
+        local_mod.clear_local_cache()
+        det = _details_by_id()["local:plain:1"]["details"]
+        assert "capabilities" not in det, det
+        print("PASS missing capabilities omitted (not invented)")
+    finally:
+        _restore_state(s)
+
+
+def test_malformed_capabilities_filtered():
+    # Through the real sanitizer (not the fake bypass).
+    ok = local_mod._sanitize_model({
+        "name": "x:1",
+        "details": {"capabilities": [123, "", "thinking", "thinking", "  tools  "]},
+    })
+    assert ok["capabilities"] == ["thinking", "tools"], ok["capabilities"]
+    none_caps = local_mod._sanitize_model({"name": "y:1", "details": {"capabilities": "not-a-list"}})
+    assert none_caps["capabilities"] is None, none_caps["capabilities"]
+    print("PASS malformed capabilities safely filtered/deduped")
+
+
+def test_no_family_based_capability_fabrication():
+    # A Qwen3 family tag with NO capabilities array must NOT auto-gain tools/thinking.
+    bad = local_mod._sanitize_model({"name": "qwen3:1.7b", "details": {"family": "qwen3"}})
+    assert bad["capabilities"] is None, bad["capabilities"]
+    print("PASS no family-based capability fabrication")
+
+
+def test_local_metadata_only_on_local_entries():
+    s = _save_state()
+    try:
+        local_mod._fetch_tags = _fake_fetch(FULL_META)
+        local_mod.clear_local_cache()
+        r = client.get("/v1/models")
+        data = r.json()["data"]
+        for m in data:
+            if m["local"]:
+                assert "details" in m, m
+            else:
+                assert "details" not in m, f"cloud model leaked details: {m['id']}"
+        print("PASS details appear only on local entries; cloud unchanged")
+    finally:
+        _restore_state(s)
+
+
+def test_missing_optional_metadata_omitted_not_invented():
+    s = _save_state()
+    try:
+        # Ollama reported a model but with sparse details
+        sparse = [{"name": "tiny:latest", "id": "local:tiny:latest", "size_bytes": 123456}]
+        local_mod._fetch_tags = _fake_fetch(sparse)
+        local_mod.clear_local_cache()
+        r = client.get("/v1/models")
+        d = {m["id"]: m for m in r.json()["data"]}["local:tiny:latest"]["details"]
+        assert d["size_bytes"] == 123456
+        assert "family" not in d
+        assert "parameter_size" not in d
+        assert "quantization_level" not in d
+        assert "context_length" not in d
+        print("PASS missing optional metadata omitted (never invented)")
+    finally:
+        _restore_state(s)
+
+
+def test_sanitize_model_handles_malformed_entries():
+    # A malformed individual entry must not crash discovery.
+    assert local_mod._sanitize_model(None) is None
+    assert local_mod._sanitize_model("not-a-dict") is None
+    assert local_mod._sanitize_model({"no_name": 1}) is None
+    bad = local_mod._sanitize_model({
+        "name": "x:1",
+        "size": "not-an-int",          # wrong type -> dropped
+        "details": "not-a-dict",        # wrong type -> dropped
+    })
+    assert bad["id"] == "local:x:1"
+    assert bad["size_bytes"] is None
+    assert bad["family"] is None
+    assert bad["capabilities"] is None  # never invented from family
+    print("PASS _sanitize_model drops malformed fields without crashing")
+
+
+def test_no_host_url_header_error_in_metadata():
+    s = _save_state()
+    try:
+        # Even if Ollama returned hostile fields, they are not retained.
+        hostile = [{
+            "name": "ok:1", "id": "local:ok:1",
+            "OLLAMA_BASE_URL": "http://10.0.0.5:11434",
+            "headers": {"Authorization": "Bearer sk-secret"},
+            "error": "boom", "raw": "<html>internal</html>",
+        }]
+        local_mod._fetch_tags = _fake_fetch(hostile)
+        local_mod.clear_local_cache()
+        r = client.get("/v1/models")
+        body = r.text.lower()
+        for forbidden in ["10.0.0.5", "11434", "sk-secret", "bearer", "authorization", "boom", "<html"]:
+            assert forbidden not in body, f"leak: {forbidden}"
+        det = {m["id"]: m for m in r.json()["data"]}["local:ok:1"].get("details") or {}
+        assert "OLLAMA_BASE_URL" not in det
+        print("PASS hostile metadata fields never retained/leaked")
+    finally:
+        _restore_state(s)
+
+
+def test_valid_empty_list_represented_honestly():
+    s = _save_state()
+    try:
+        local_mod._fetch_tags = _fake_fetch([])
+        local_mod.clear_local_cache()
+        st = asyncio.run(local_mod.local_models_with_status())
+        assert st["status"] == "ok", st
+        assert st["models"] == []
+        print("PASS valid empty Ollama list => status 'ok', models []")
+    finally:
+        _restore_state(s)
+
+
+def test_discovery_failure_distinguishable_from_empty():
+    s = _save_state()
+    try:
+        async def boom():
+            raise local_mod.DiscoveryError("down")
+
+        local_mod._fetch_tags = boom
+        local_mod.clear_local_cache()
+        st = asyncio.run(local_mod.local_models_with_status())
+        assert st["status"] == "unavailable", st
+        assert st["models"] == []
+        print("PASS discovery failure => status 'unavailable' (distinct from empty ok)")
+    finally:
+        _restore_state(s)
+
+
+def test_failure_backoff_request_reports_unavailable():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 4.0  # long enough to stay in backoff
+        local_mod.clear_local_cache()
+
+        async def boom():
+            raise local_mod.DiscoveryError("down")
+
+        local_mod._fetch_tags = boom
+        first = asyncio.run(local_mod.local_models_with_status())
+        assert first["status"] == "unavailable", first
+        assert first["models"] == []
+        # A follow-up request inside the failure backoff must still report unavailable
+        second = asyncio.run(local_mod.local_models_with_status())
+        assert second["status"] == "unavailable", second
+        print("PASS failure-backoff request => status 'unavailable'")
+    finally:
+        _restore_state(s)
+
+
+def test_recovery_after_backoff_reports_ok():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 0.05
+        local_mod.clear_local_cache()
+        holder = {"mode": "fail"}
+
+        async def flaky():
+            if holder["mode"] == "fail":
+                raise local_mod.DiscoveryError("down")
+            return [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
+
+        local_mod._fetch_tags = flaky
+        assert asyncio.run(local_mod.local_models_with_status())["status"] == "unavailable"
+        holder["mode"] = "ok"
+        time.sleep(0.1)
+        recovered = asyncio.run(local_mod.local_models_with_status())
+        assert recovered["status"] == "ok", recovered
+        assert recovered["models"] == [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
+        print("PASS recovery after backoff => status 'ok'")
+    finally:
+        _restore_state(s)
+
+
+def test_successful_populated_discovery_ok():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 4.0
+        local_mod.clear_local_cache()
+        local_mod._fetch_tags = _fake_fetch([{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}])
+        st = asyncio.run(local_mod.local_models_with_status())
+        assert st["status"] == "ok", st
+        assert len(st["models"]) == 1
+        print("PASS successful populated discovery => status 'ok'")
+    finally:
+        _restore_state(s)
+
+
+def test_clear_local_cache_resets_failure_time():
+    s = _save_state()
+    try:
+        # Regression: clear_local_cache must actually reset the module-level
+        # _failure_time (it previously rebound a local var and leaked state).
+        async def boom():
+            raise local_mod.DiscoveryError("down")
+
+        local_mod._fetch_tags = boom
+        local_mod.clear_local_cache()
+        asyncio.run(local_mod.local_model_ids())
+        assert local_mod._failure_time > 0.0
+        local_mod.clear_local_cache()
+        assert local_mod._failure_time == 0.0, "failure_time not reset"
+        assert local_mod._success_cache["models"] is None
+        print("PASS clear_local_cache resets _failure_time (scoping fixed)")
+    finally:
+        _restore_state(s)
+
+
+def test_cache_refresh_is_zero_inference_and_safe():
+    s = _save_state()
+    try:
+        calls = {"n": 0}
+
+        async def counting():
+            calls["n"] += 1
+            return [{"name": "qwen3:1.7b", "id": "local:qwen3:1.7b"}]
+
+        local_mod._fetch_tags = counting
+        local_mod.clear_local_cache()
+        asyncio.run(local_mod.local_model_ids())
+        asyncio.run(local_mod.local_model_ids())  # served from cache
+        assert calls["n"] == 1
+        local_mod.clear_local_cache()  # refresh bypasses only local cache
+        st = asyncio.run(local_mod.local_models_with_status())
+        assert calls["n"] == 2
+        assert st["status"] == "ok"
+        print("PASS refresh bypasses local cache and re-discovers (zero inference)")
     finally:
         _restore_state(s)
 

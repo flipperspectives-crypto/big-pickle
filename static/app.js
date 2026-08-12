@@ -11,6 +11,10 @@
   var sessionKey = "";
   var lastBalance = null;
 
+  /* Local model discovery state (read-only panel). */
+  var LOCAL_STATUS = "ok";        // "ok" | "unavailable" (from /v1/models)
+  var localThinkingOn = false;    // Qwen3 Thinking toggle; default OFF (verified)
+
   /* =========================================================================
      Pure helpers (exposed on window.ClarityUX for verification/tests)
      ========================================================================= */
@@ -52,7 +56,10 @@
       model: model,
       messages: [{ role: "user", content: prompt }]
     };
-    if (typeof model === "string" && model.indexOf("local:qwen3:") === 0) {
+    // Local Qwen3: disable thinking by default (verified). When the user turns
+    // Thinking ON we omit reasoning_effort entirely and let Ollama/Qwen3 use its
+    // default behavior. Never applied to cloud or non-Qwen models.
+    if (typeof model === "string" && model.indexOf("local:qwen3:") === 0 && !localThinkingOn) {
       body.reasoning_effort = "none";
     }
     return body;
@@ -62,6 +69,23 @@
     mapPlaygroundState: mapPlaygroundState,
     safeReason: safeReason,
     buildChatBody: buildChatBody,
+    setThinking: function (on) { localThinkingOn = !!on; },
+    getSelectedModel: function () { return selectedModel; },
+    setLocalModels: function (list, status) {
+      MODELS = (list || []).map(function (m) {
+        return {
+          id: m.id,
+          local: !!m.local,
+          providers: Array.isArray(m.providers) ? m.providers : [],
+          details: (m.details && typeof m.details === "object") ? m.details : null
+        };
+      });
+      LOCAL_STATUS = (status === "unavailable") ? "unavailable" : "ok";
+      renderLocalModels();
+    },
+    useInPlayground: useInPlayground,
+    refreshLocalModels: refreshLocalModels,
+    renderLocalModels: renderLocalModels,
     PG_STATE_LABELS: PG_STATE_LABELS
   };
 
@@ -199,16 +223,19 @@
       var r = await fetch(API_BASE + "/models", { cache: "no-store" });
       if (!r.ok) throw new Error("HTTP " + r.status);
       var d = await r.json();
-      MODELS = (d.data || []).map(function (m) {
-        return {
-          id: m.id,
-          local: !!m.local,
-          providers: Array.isArray(m.providers) ? m.providers : []
-        };
-      });
-      renderModelRail(rail);
-      populateSelector();
-      renderMetrics();
+       MODELS = (d.data || []).map(function (m) {
+         return {
+           id: m.id,
+           local: !!m.local,
+           providers: Array.isArray(m.providers) ? m.providers : [],
+           details: (m.details && typeof m.details === "object") ? m.details : null
+         };
+       });
+       LOCAL_STATUS = (d.local_status === "unavailable") ? "unavailable" : "ok";
+       renderModelRail(rail);
+       populateSelector();
+       renderMetrics();
+       renderLocalModels();
     } catch (e) {
       renderModelsError(errBox, e);
     }
@@ -263,6 +290,133 @@
     setMetric("m-local", String(local), local ? "accent" : "", "billed at $0");
     setMetric("m-cloud", cloud > 0 ? String(Object.keys(providers).length) : "—", cloud ? "" : "", "providers behind the gateway");
   }
+
+  /* =========================================================================
+     Local Models control panel (read-only; exact Ollama report)
+     ========================================================================= */
+  var CAP_LABELS = { completion: "Completion", tools: "Tools", thinking: "Thinking" };
+
+  function humanBytes(b) {
+    if (typeof b !== "number" || b <= 0) return "";
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + " GB";
+    if (b >= 1048576) return Math.round(b / 1048576) + " MB";
+    return b + " B";
+  }
+
+  function renderLocalModels() {
+    var panel = el("local-models-list");
+    var statusLine = el("local-models-status");
+    if (!panel) return;
+    var localModels = MODELS.filter(function (m) { return m.local; });
+
+    if (LOCAL_STATUS === "unavailable") {
+      if (statusLine) statusLine.textContent = "Local discovery unavailable — Ollama could not be reached.";
+      panel.innerHTML = '<div class="degraded">Local discovery unavailable. Check that your Ollama host is connected to the gateway, then press <b>Refresh</b>.</div>';
+      return;
+    }
+    if (!localModels.length) {
+      if (statusLine) statusLine.textContent = "No local models discovered.";
+      panel.innerHTML = '<div class="degraded">No local models installed. Pull a model in Ollama (e.g. <code>ollama pull qwen3:1.7b</code>) and press <b>Refresh</b>.</div>';
+      return;
+    }
+
+    if (statusLine) statusLine.textContent = localModels.length + " local model" + (localModels.length > 1 ? "s" : "") + " discovered.";
+    var html = "";
+    localModels.forEach(function (m) {
+      var d = m.details || {};
+      var rows = "";
+      function row(k, v) { return '<div class="lm-row"><span class="lm-k">' + k + '</span><span class="lm-v">' + v + "</span></div>"; }
+      if (d.parameter_size) rows += row("Parameters", escapeHtml(d.parameter_size));
+      if (d.quantization_level) rows += row("Quantization", escapeHtml(d.quantization_level));
+      if (d.family) rows += row("Family", escapeHtml(d.family));
+      if (d.context_length) rows += row("Context", escapeHtml(String(d.context_length)) + " tokens");
+      var size = humanBytes(d.size_bytes);
+      if (size) rows += row("Installed size", size);
+
+      var badges = "";
+      var caps = Array.isArray(d.capabilities) ? d.capabilities : [];
+      caps.forEach(function (c) {
+        if (CAP_LABELS[c]) badges += '<span class="chip cap">' + CAP_LABELS[c] + "</span>";
+      });
+
+      html +=
+        '<div class="lm-card" role="listitem">' +
+          '<div class="lm-head">' +
+            '<div class="lm-name">' + escapeHtml(m.id) + "</div>" +
+            '<span class="chip local tag">LOCAL · $0</span>' +
+          "</div>" +
+          '<div class="lm-status">Ready</div>' +
+          (rows ? '<div class="lm-rows">' + rows + "</div>" : "") +
+          (badges ? '<div class="lm-caps">' + badges + "</div>" : "") +
+          '<button class="btn btn-sm lm-use" type="button" data-use="' + escapeHtml(m.id) + '">Use in Playground</button>' +
+        "</div>";
+    });
+    panel.innerHTML = html;
+  }
+
+  function syncThinkingToggle() {
+    var field = el("pg-thinking-field");
+    if (!field) return;
+    var isQwen3 = typeof selectedModel === "string" && selectedModel.indexOf("local:qwen3:") === 0;
+    field.hidden = !isQwen3;
+    if (!isQwen3) {
+      localThinkingOn = false;
+      var cb = el("pg-thinking");
+      if (cb) cb.checked = false;
+      var st = el("pg-thinking-state");
+      if (st) st.textContent = "OFF";
+    }
+  }
+
+  async function refreshLocalModels() {
+    try {
+      var r = await fetch(API_BASE + "/models?refresh=1", { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      var d = await r.json();
+      MODELS = (d.data || []).map(function (m) {
+        return {
+          id: m.id,
+          local: !!m.local,
+          providers: Array.isArray(m.providers) ? m.providers : [],
+          details: (m.details && typeof m.details === "object") ? m.details : null
+        };
+      });
+      LOCAL_STATUS = (d.local_status === "unavailable") ? "unavailable" : "ok";
+    } catch (e) {
+      // Keep the last good view; the backend reports local_status honestly.
+    }
+    renderModelRail(el("model-rail"));
+    populateSelector();
+    renderMetrics();
+    renderLocalModels();
+  }
+
+  function useInPlayground(id) {
+    chooseModel(id, null);
+    var pg = el("playground");
+    if (pg && pg.scrollIntoView) {
+      pg.scrollIntoView({ behavior: REDUCED_MOTION ? "auto" : "smooth", block: "start" });
+    }
+    var prompt = el("pg-prompt");
+    if (prompt && prompt.focus) prompt.focus();
+  }
+
+  (function wireLocalModels() {
+    var lmRefresh = el("local-models-refresh");
+    if (lmRefresh) lmRefresh.addEventListener("click", refreshLocalModels);
+    var lmList = el("local-models-list");
+    if (lmList) lmList.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest(".lm-use") : null;
+      if (btn && btn.dataset && btn.dataset.use) useInPlayground(btn.dataset.use);
+    });
+    var pgThinking = el("pg-thinking");
+    if (pgThinking) pgThinking.addEventListener("change", function () {
+      localThinkingOn = !!this.checked;
+      var st = el("pg-thinking-state");
+      if (st) st.textContent = localThinkingOn ? "ON" : "OFF";
+      this.setAttribute("aria-checked", String(this.checked));
+    });
+  })();
 
   /* =========================================================================
      Model selector (combobox)
@@ -325,6 +479,7 @@
     selectedModel = id;
     el("pg-model-label").textContent = id;
     el("pg-model-label").title = id;
+    syncThinkingToggle();
     if (opt) {
       optionsBox.querySelectorAll(".select-opt").forEach(function (o) {
         o.setAttribute("aria-selected", String(o === opt));

@@ -11,7 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import providers, x402
+from . import providers, x402, local
 from .config import settings
 from .db import (
     add_credits,
@@ -100,6 +100,7 @@ def _customer_key(authorization: str | None, x_api_key: str | None) -> dict:
 
 @app.get("/v1/models")
 async def models(
+    request: Request,
     authorization: str | None = Header(None),
     x_api_key: str | None = Header(None),
     response: Response = None,
@@ -112,17 +113,57 @@ async def models(
         response.headers["Pragma"] = "no-cache"
     if authorization or x_api_key:
         _customer_key(authorization, x_api_key)
+    if request.query_params.get("refresh") == "1":
+        # Zero-cost, read-only refresh: bypass ONLY the local discovery cache so
+        # the next read re-queries Ollama. Uses the existing discovery lock and
+        # failure backoff; never restarts/pulls Ollama or runs inference.
+        local.clear_local_cache()
+    local_state = await local.local_models_with_status()
+    local_by_id = {m["id"]: m for m in local_state["models"]}
+    cloud_ids = set(await available_models()) - set(local_by_id.keys())
+    all_ids = sorted(cloud_ids | set(local_by_id.keys()))
     data = []
-    for m in await available_models():
-        ps = providers.providers_for(m)
-        data.append({
-            "id": m,
-            "object": "model",
-            "local": providers.is_free_model(m),
-            "providers": ps,
-            "created": 0,
-        })
-    return {"object": "list", "data": data}
+    for mid in all_ids:
+        if mid.startswith("local:"):
+            m = local_by_id.get(mid, {})
+            data.append({
+                "id": mid,
+                "object": "model",
+                "local": True,
+                "providers": ["local"],
+                "created": 0,
+                "details": _public_details(m),
+            })
+        else:
+            data.append({
+                "id": mid,
+                "object": "model",
+                "local": providers.is_free_model(mid),
+                "providers": providers.providers_for(mid),
+                "created": 0,
+            })
+    return {"object": "list", "data": data, "local_status": local_state["status"]}
+
+
+def _public_details(m: dict) -> dict | None:
+    """Sanitized local-model metadata for the API. Only fields Ollama actually
+    provided are included; absent fields are omitted (never invented)."""
+    if not isinstance(m, dict):
+        return None
+    d: dict = {}
+    if m.get("size_bytes") is not None:
+        d["size_bytes"] = m["size_bytes"]
+    if m.get("family"):
+        d["family"] = m["family"]
+    if m.get("parameter_size"):
+        d["parameter_size"] = m["parameter_size"]
+    if m.get("quantization_level"):
+        d["quantization_level"] = m["quantization_level"]
+    if m.get("context_length") is not None:
+        d["context_length"] = m["context_length"]
+    if m.get("capabilities"):
+        d["capabilities"] = m["capabilities"]
+    return d or None
 
 
 @app.post("/v1/chat/completions")

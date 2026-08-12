@@ -212,6 +212,14 @@
               </div>
             </div>
           </div>
+          <div class="field" id="pg-thinking-field" hidden>
+            <label for="pg-thinking">Thinking <span class="hint">— Qwen3 local only</span></label>
+            <label class="switch" for="pg-thinking">
+              <input type="checkbox" id="pg-thinking" role="switch" aria-checked="false">
+              <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+              <span class="switch-state" id="pg-thinking-state">OFF</span>
+            </label>
+          </div>
           <div class="field">
             <label for="pg-prompt">Prompt</label>
             <textarea class="input" id="pg-prompt" rows="6" placeholder="Ask something…">Explain Clarity in one sentence.</textarea>
@@ -327,6 +335,15 @@ curl <span class="hl" id="curl-base-url">…</span> \
         </div>
       </div>
       <p class="local-note">Because inference happens on your hardware, speed and availability depend on your machine — Clarity only routes and meters the request.</p>
+
+      <div class="local-models" id="local-models-panel" aria-labelledby="lm-title">
+        <div class="lm-head-row">
+          <h3 id="lm-title">Local Models</h3>
+          <button class="btn btn-sm btn-ghost" type="button" id="local-models-refresh" aria-label="Refresh local models">Refresh</button>
+        </div>
+        <p class="lm-status-line" id="local-models-status">Checking local Ollama…</p>
+        <div class="lm-grid" id="local-models-list" role="list" aria-label="Local models"></div>
+      </div>
     </div>
   </section>
 
