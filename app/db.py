@@ -93,6 +93,17 @@ def get_key(skey: str) -> dict | None:
         conn.close()
 
 
+def get_key_by_name(name: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM keys WHERE name = ? AND active = 1", (name,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def list_keys() -> list[dict]:
     conn = _conn()
     try:

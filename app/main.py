@@ -7,10 +7,11 @@ import os
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import providers
+from . import providers, x402
 from .config import settings
 from .db import (
     add_credits,
@@ -37,6 +38,11 @@ app.add_middleware(
 )
 
 init_db()
+
+# x402 machine-payable top-up (disabled unless X402_PAYTO is configured)
+_x402_mw = x402.build_x402_middleware()
+if _x402_mw is not None:
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_x402_mw)
 
 _STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 if os.path.isdir(_STATIC):
@@ -185,6 +191,13 @@ async def admin_usage(x_admin_key: str | None = Header(None)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/v1/x402/topup")
+async def x402_topup(request: Request):
+    if not settings.X402_PAYTO:
+        raise HTTPException(501, "x402 top-up not configured")
+    return await x402.x402_topup(request)
 
 
 @app.post("/v1/checkout")

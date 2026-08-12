@@ -15,6 +15,13 @@ class Settings:
     STRIPE_PRICE_USD: float = float(_env("STRIPE_PRICE_USD", "10"))
     HF_KEY: str = _env("HF_TOKEN", "") or _env("GATEWAY_HF_KEY", "")
     MARKUP: float = float(_env("GATEWAY_MARKUP", "1.25"))
+    # x402 machine-payable top-up (x402 v2, EIP-3009 USDC, Base Sepolia eip155:84532)
+    X402_ENABLED: bool = _env("X402_ENABLED", "false").lower() in ("1", "true", "yes")
+    X402_PAYTO: str = _env("X402_PAYTO", "")  # gateway receiving wallet (public address)
+    X402_PRICE_USD: str = _env("X402_PRICE_USD", "0.001")
+    X402_CHAIN_ID: str = _env("X402_CHAIN_ID", "eip155:84532")
+    X402_FACILITATOR_URL: str = _env("X402_FACILITATOR_URL", "https://x402.org/facilitator")
+    X402_RPC_URL: str = _env("X402_RPC_URL", "https://sepolia.base.org")
 
     def provider_key(self, name: str) -> str:
         key = _env(f"GATEWAY_{name.upper()}_KEY")
