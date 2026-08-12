@@ -220,6 +220,35 @@
               <span class="switch-state" id="pg-thinking-state">OFF</span>
             </label>
           </div>
+          <div class="field gen-field" id="pg-gen-field" hidden>
+            <div class="gen-head">
+              <label>Local generation controls</label>
+              <button class="btn btn-sm btn-ghost" type="button" id="pg-gen-reset">Reset to model defaults</button>
+            </div>
+            <p class="hint gen-hint">Unset controls use the model/Ollama defaults.</p>
+            <div class="gen-grid">
+              <div class="gen-item">
+                <label for="pg-max-tokens">Max output tokens</label>
+                <input class="input mono" type="number" id="pg-max-tokens" min="1" step="1" placeholder="Model default" inputmode="numeric" autocomplete="off" aria-describedby="pg-max-tokens-err">
+                <div class="control-error" id="pg-max-tokens-err" hidden></div>
+              </div>
+              <div class="gen-item">
+                <label for="pg-temperature">Temperature</label>
+                <input class="input mono" type="number" id="pg-temperature" min="0" step="0.1" placeholder="Model default" inputmode="decimal" autocomplete="off" aria-describedby="pg-temperature-err">
+                <div class="control-error" id="pg-temperature-err" hidden></div>
+              </div>
+              <div class="gen-item">
+                <label for="pg-top-p">Top P</label>
+                <input class="input mono" type="number" id="pg-top-p" min="0" max="1" step="0.05" placeholder="Model default" inputmode="decimal" autocomplete="off" aria-describedby="pg-top-p-err">
+                <div class="control-error" id="pg-top-p-err" hidden></div>
+              </div>
+              <div class="gen-item">
+                <label for="pg-seed">Seed</label>
+                <input class="input mono" type="number" id="pg-seed" min="0" step="1" placeholder="Model default" inputmode="numeric" autocomplete="off" aria-describedby="pg-seed-err">
+                <div class="control-error" id="pg-seed-err" hidden></div>
+              </div>
+            </div>
+          </div>
           <div class="field">
             <label for="pg-prompt">Prompt</label>
             <textarea class="input" id="pg-prompt" rows="6" placeholder="Ask something…">Explain Clarity in one sentence.</textarea>

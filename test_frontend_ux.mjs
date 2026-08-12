@@ -395,5 +395,113 @@ await ux.refreshLocalModels();
 check("refresh hits /v1/models?refresh=1 (zero inference)", fetchCalls.some((c) => c.url.includes("/models?refresh=1")));
 
 
+/* ---- Local Generation Controls (local models only, no real inference) ---- */
+// Defaults: every control unset => all four fields omitted from the body.
+ux.resetControls();
+const gcUnset = ux.buildChatBody("local:qwen3:1.7b", "hi");
+check("gen controls unset -> max_tokens omitted", gcUnset.max_tokens === undefined);
+check("gen controls unset -> temperature omitted", gcUnset.temperature === undefined);
+check("gen controls unset -> top_p omitted", gcUnset.top_p === undefined);
+check("gen controls unset -> seed omitted", gcUnset.seed === undefined);
+check("gen controls unset -> still local reasoning_effort", gcUnset.reasoning_effort === "none");
+
+// Each control, set individually, is included for a local model.
+ux.resetControls();
+ux.setGenerationControls({ max_tokens: 128 });
+check("local max_tokens set -> included", ux.buildChatBody("local:qwen3:1.7b", "hi").max_tokens === 128);
+
+ux.resetControls();
+ux.setGenerationControls({ temperature: 0.4 });
+check("local temperature set -> included", ux.buildChatBody("local:qwen3:1.7b", "hi").temperature === 0.4);
+
+ux.resetControls();
+ux.setGenerationControls({ top_p: 0.9 });
+check("local top_p set -> included", ux.buildChatBody("local:qwen3:1.7b", "hi").top_p === 0.9);
+
+ux.resetControls();
+ux.setGenerationControls({ seed: 42 });
+check("local seed set -> included", ux.buildChatBody("local:qwen3:1.7b", "hi").seed === 42);
+
+// Multiple controls combine correctly.
+ux.resetControls();
+ux.setGenerationControls({ max_tokens: 128, temperature: 0.4, top_p: 0.9, seed: 42 });
+const gcAll = ux.buildChatBody("local:qwen3:1.7b", "hi");
+check("multiple controls combine", gcAll.max_tokens === 128 && gcAll.temperature === 0.4 && gcAll.top_p === 0.9 && gcAll.seed === 42);
+
+// Reset to model defaults returns to omitted state.
+ux.resetControls();
+const gcReset = ux.buildChatBody("local:qwen3:1.7b", "hi");
+check("reset -> no generation fields", gcReset.max_tokens === undefined && gcReset.temperature === undefined && gcReset.top_p === undefined && gcReset.seed === undefined);
+
+// Invalid values are rejected (omitted from body) and validateControl reports them.
+ux.resetControls();
+ux.setGenerationControls({ max_tokens: -5 });
+check("invalid max_tokens rejected (omitted)", ux.buildChatBody("local:qwen3:1.7b", "hi").max_tokens === undefined);
+check("validateControl max_tokens -5 -> invalid", ux.validateControl("max_tokens", -5).ok === false);
+check("validateControl max_tokens 1.5 -> invalid", ux.validateControl("max_tokens", 1.5).ok === false);
+check("validateControl max_tokens abc -> invalid", ux.validateControl("max_tokens", "abc").ok === false);
+check("validateControl max_tokens 0 -> invalid", ux.validateControl("max_tokens", 0).ok === false);
+
+ux.resetControls();
+ux.setGenerationControls({ temperature: -0.1 });
+check("invalid temperature rejected (omitted)", ux.buildChatBody("local:qwen3:1.7b", "hi").temperature === undefined);
+check("validateControl temperature -0.1 -> invalid", ux.validateControl("temperature", -0.1).ok === false);
+
+ux.resetControls();
+ux.setGenerationControls({ top_p: 1.2 });
+check("invalid top_p rejected (omitted)", ux.buildChatBody("local:qwen3:1.7b", "hi").top_p === undefined);
+check("validateControl top_p 1.2 -> invalid", ux.validateControl("top_p", 1.2).ok === false);
+
+ux.resetControls();
+ux.setGenerationControls({ seed: 2.5 });
+check("invalid seed rejected (omitted)", ux.buildChatBody("local:qwen3:1.7b", "hi").seed === undefined);
+check("validateControl seed 2.5 -> invalid", ux.validateControl("seed", 2.5).ok === false);
+
+// Valid boundary values are accepted.
+check("validateControl temperature 0 -> valid", ux.validateControl("temperature", 0).ok === true);
+check("validateControl top_p 0 -> valid", ux.validateControl("top_p", 0).ok === true);
+check("validateControl top_p 1 -> valid", ux.validateControl("top_p", 1).ok === true);
+check("validateControl max_tokens 1 -> valid", ux.validateControl("max_tokens", 1).ok === true);
+check("validateControl seed 0 -> valid", ux.validateControl("seed", 0).ok === true);
+
+// Qwen3 Thinking OFF + generation controls coexist (reasoning_effort + controls).
+ux.setThinking(false);
+ux.resetControls();
+ux.setGenerationControls({ max_tokens: 128, temperature: 0.4, top_p: 0.9, seed: 42 });
+const offC = ux.buildChatBody("local:qwen3:1.7b", "hi");
+check("Thinking OFF + controls: reasoning_effort=none", offC.reasoning_effort === "none");
+check("Thinking OFF + controls: all four present", offC.max_tokens === 128 && offC.temperature === 0.4 && offC.top_p === 0.9 && offC.seed === 42);
+
+// Qwen3 Thinking ON + generation controls coexist (no reasoning_effort, controls still sent).
+ux.setThinking(true);
+const onC = ux.buildChatBody("local:qwen3:1.7b", "hi");
+check("Thinking ON + controls: reasoning_effort omitted", onC.reasoning_effort === undefined);
+check("Thinking ON + controls: all four present", onC.max_tokens === 128 && onC.temperature === 0.4 && onC.top_p === 0.9 && onC.seed === 42);
+ux.setThinking(false);
+
+// Cloud isolation: a cloud request never receives any local control value.
+ux.resetControls();
+ux.setGenerationControls({ max_tokens: 128, temperature: 0.4, top_p: 0.9, seed: 42 });
+const cloudGcBody = ux.buildChatBody("openai/gpt-4o", "hi");
+check("cloud request -> no max_tokens", cloudGcBody.max_tokens === undefined);
+check("cloud request -> no temperature", cloudGcBody.temperature === undefined);
+check("cloud request -> no top_p", cloudGcBody.top_p === undefined);
+check("cloud request -> no seed", cloudGcBody.seed === undefined);
+check("cloud request -> no reasoning_effort", cloudGcBody.reasoning_effort === undefined);
+check("isLocalModel cloud false", ux.isLocalModel("openai/gpt-4o") === false);
+check("isLocalModel local: true", ux.isLocalModel("local:qwen3:1.7b") === true);
+
+// Switching local -> cloud cannot leak controls into the cloud body.
+const cloudLeak = ux.buildChatBody("anthropic/claude-3-opus", "hi");
+check("local->cloud switch cannot leak controls", cloudLeak.max_tokens === undefined && cloudLeak.temperature === undefined && cloudLeak.top_p === undefined && cloudLeak.seed === undefined);
+
+// Non-Qwen local models also receive explicitly set controls.
+ux.resetControls();
+ux.setGenerationControls({ max_tokens: 64 });
+check("non-Qwen local gets control", ux.buildChatBody("local/llama-3-8b", "hi").max_tokens === 64);
+
+ux.resetControls();
+ux.setThinking(false);
+
 console.log(failures === 0 ? "\nALL FRONTEND UX CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

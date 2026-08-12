@@ -15,6 +15,11 @@
   var LOCAL_STATUS = "ok";        // "ok" | "unavailable" (from /v1/models)
   var localThinkingOn = false;    // Qwen3 Thinking toggle; default OFF (verified)
 
+  /* Local Generation Controls (LOCAL models only). Each entry is null when the
+     control is unset ("Model default" => the field is omitted from the request).
+     Values are kept in memory only — never persisted to browser storage or the DB. */
+  var genControls = { max_tokens: null, temperature: null, top_p: null, seed: null };
+
   /* =========================================================================
      Pure helpers (exposed on window.ClarityUX for verification/tests)
      ========================================================================= */
@@ -46,11 +51,51 @@
       .replace(/\b[a-z0-9_-]+(?:\.[a-z0-9_-]+){1,}\.(?:com|net|org|io|ai|sh|dev|local|internal|example)\b/gi, "[host]");
   }
 
+  /* Validate a single Local Generation Control raw value.
+     Empty / null / undefined => unset ("Model default"): { ok:true, value:null }.
+     Otherwise returns { ok, value, error }. We never invent a default. */
+  function validateControl(name, raw) {
+    if (raw === null || raw === undefined || raw === "") return { ok: true, value: null };
+    var n = Number(raw);
+    if (!Number.isFinite(n)) return { ok: false, error: "Enter a number." };
+    if (name === "max_tokens") {
+      if (!Number.isInteger(n) || n <= 0) return { ok: false, error: "Must be a positive whole number." };
+    } else if (name === "seed") {
+      if (!Number.isInteger(n)) return { ok: false, error: "Must be a whole number." };
+    } else if (name === "temperature") {
+      if (n < 0) return { ok: false, error: "Must be 0 or greater." };
+    } else if (name === "top_p") {
+      if (n < 0 || n > 1) return { ok: false, error: "Must be between 0 and 1." };
+    }
+    return { ok: true, value: n };
+  }
+
+  /* A model is local if it uses the local:* convention or was discovered as a
+     local model. Cloud models never receive generation controls. */
+  function isLocalModel(m) {
+    if (typeof m !== "string") return false;
+    if (m.indexOf("local:") === 0) return true;
+    return MODELS.some(function (x) { return x.id === m && x.local; });
+  }
+
+  /* First invalid, non-empty control => concise message, else null. Used to
+     block submission of the whole request when any control is invalid. */
+  function firstControlError() {
+    var fields = ["max_tokens", "temperature", "top_p", "seed"];
+    for (var i = 0; i < fields.length; i++) {
+      var raw = genControls[fields[i]];
+      if (raw === null || raw === undefined || raw === "") continue;
+      var res = validateControl(fields[i], raw);
+      if (!res.ok) return res.error;
+    }
+    return null;
+  }
+
   /* Build the /v1/chat/completions request body. Local Qwen3 models reason by
-     default in Ollama, which appends a "<think:6124c78e>…</think:6124c78e>" block; for normal
-     Playground use we disable that so responses are concise. Only local Qwen3
-     models get reasoning_effort="none" — cloud and other local models are left
-     untouched (no blanket change to unrelated providers). */
+      default in Ollama, which appends a "<think:6124c78e>…</think:6124c78e>" block; for normal
+      Playground use we disable that so responses are concise. Only local Qwen3
+      models get reasoning_effort="none" — cloud and other local models are left
+      untouched (no blanket change to unrelated providers). */
   function buildChatBody(model, prompt) {
     var body = {
       model: model,
@@ -62,6 +107,17 @@
     if (typeof model === "string" && model.indexOf("local:qwen3:") === 0 && !localThinkingOn) {
       body.reasoning_effort = "none";
     }
+    // Local Generation Controls: include only explicitly-set, valid values.
+    // Cloud models and unset controls are omitted, so existing behavior for
+    // cloud and untouched-local requests is unchanged.
+    if (isLocalModel(model)) {
+      ["max_tokens", "temperature", "top_p", "seed"].forEach(function (k) {
+        var raw = genControls[k];
+        if (raw === null || raw === undefined || raw === "") return;   // Model default => omit
+        var res = validateControl(k, raw);
+        if (res.ok && res.value !== null) body[k] = res.value;          // invalid => not submitted
+      });
+    }
     return body;
   }
 
@@ -70,6 +126,17 @@
     safeReason: safeReason,
     buildChatBody: buildChatBody,
     setThinking: function (on) { localThinkingOn = !!on; },
+    setGenerationControls: function (obj) {
+      ["max_tokens", "temperature", "top_p", "seed"].forEach(function (k) {
+        genControls[k] = (obj && obj[k] !== undefined) ? obj[k] : null;
+      });
+    },
+    getGenerationControls: function () { return genControls; },
+    resetControls: function () {
+      genControls = { max_tokens: null, temperature: null, top_p: null, seed: null };
+    },
+    validateControl: validateControl,
+    isLocalModel: isLocalModel,
     getSelectedModel: function () { return selectedModel; },
     setLocalModels: function (list, status) {
       MODELS = (list || []).map(function (m) {
@@ -377,6 +444,15 @@
     }
   }
 
+  function syncGenControlsVisibility() {
+    var field = el("pg-gen-field");
+    if (!field) return;
+    // Show Local Generation Controls only for local models. Selecting a cloud
+    // model hides them — and buildChatBody() will omit the fields regardless, so
+    // no local control values can ever reach a cloud request.
+    field.hidden = !isLocalModel(selectedModel);
+  }
+
   async function refreshLocalModels() {
     try {
       var r = await fetch(API_BASE + "/models?refresh=1", { cache: "no-store" });
@@ -424,6 +500,34 @@
       var st = el("pg-thinking-state");
       if (st) st.textContent = localThinkingOn ? "ON" : "OFF";
       this.setAttribute("aria-checked", String(this.checked));
+    });
+  })();
+
+  (function wireGenControls() {
+    var defs = [
+      { name: "max_tokens", id: "pg-max-tokens", err: "pg-max-tokens-err" },
+      { name: "temperature", id: "pg-temperature", err: "pg-temperature-err" },
+      { name: "top_p", id: "pg-top-p", err: "pg-top-p-err" },
+      { name: "seed", id: "pg-seed", err: "pg-seed-err" }
+    ];
+    defs.forEach(function (d) {
+      var input = el(d.id);
+      if (!input) return;
+      input.addEventListener("input", function () {
+        var raw = input.value.trim();
+        genControls[d.name] = raw === "" ? null : raw;
+        var res = validateControl(d.name, raw);
+        setError(d.err, res.ok ? null : res.error);
+      });
+    });
+    var reset = el("pg-gen-reset");
+    if (reset) reset.addEventListener("click", function () {
+      defs.forEach(function (d) {
+        var input = el(d.id);
+        if (input) input.value = "";
+        genControls[d.name] = null;
+        setError(d.err, null);
+      });
     });
   })();
 
@@ -596,6 +700,7 @@
     el("pg-model-label").textContent = id;
     el("pg-model-label").title = id;
     syncThinkingToggle();
+    syncGenControlsVisibility();
     if (opt) {
       optionsBox.querySelectorAll(".select-opt").forEach(function (o) {
         o.setAttribute("aria-selected", String(o === opt));
@@ -841,6 +946,9 @@
     if (!selectedModel) { setError("pg-error", "Select a model from the list."); return; }
     var prompt = el("pg-prompt").value.trim();
     if (!prompt) { setError("pg-error", "Write a prompt first."); return; }
+
+    var genErr = firstControlError();
+    if (genErr) { setError("pg-error", "Generation control: " + genErr); return; }
 
     setBtnLoading(pgRun, true, "Routing request…");
     setPgStatus("busy", PG_STATE_LABELS.busy);
