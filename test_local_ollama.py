@@ -18,6 +18,7 @@ import asyncio
 import io
 import logging
 import os
+import time
 
 os.environ.setdefault("GATEWAY_DB", "/tmp/gateway_local_test.db")
 os.environ.setdefault("GATEWAY_ADMIN_KEY", "testadmin")
@@ -42,6 +43,11 @@ def _save_state():
         "ollama": settings.OLLAMA_BASE_URL,
         "fetch": local_mod._fetch_tags,
         "probe": getattr(status_mod, "_provider_probe", None),
+        "success_models": local_mod._success_cache["models"],
+        "success_time": local_mod._success_cache["time"],
+        "failure_time": local_mod._failure_time,
+        "ttl": local_mod.DISCOVERY_CACHE_TTL,
+        "fttl": local_mod.FAILURE_TTL,
     }
 
 
@@ -50,7 +56,11 @@ def _restore_state(s):
     local_mod._fetch_tags = s["fetch"]
     if s["probe"] is not None:
         status_mod._provider_probe = s["probe"]
-    local_mod.clear_local_cache()
+    local_mod._success_cache["models"] = s["success_models"]
+    local_mod._success_cache["time"] = s["success_time"]
+    local_mod._failure_time = s["failure_time"]
+    local_mod.DISCOVERY_CACHE_TTL = s["ttl"]
+    local_mod.FAILURE_TTL = s["fttl"]
     status_mod.clear_status_cache()
 
 
@@ -253,6 +263,136 @@ def test_no_private_info_leak():
             for f in forbidden:
                 assert f not in low, f"leak: '{f}' present in response/log"
         print("PASS no private hostname/url/body/key leaked in /v1/models or /v1/status")
+    finally:
+        _restore_state(s)
+
+
+def test_failure_fails_closed_no_success_cache():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 4.0
+        local_mod.clear_local_cache()
+
+        async def boom():
+            raise local_mod.DiscoveryError("boom")
+
+        local_mod._fetch_tags = boom
+        ids = asyncio.run(local_mod.local_model_ids())
+        assert ids == [], ids
+        # A failure must NOT be stored as a successful (empty) 60s result.
+        assert local_mod._success_cache["models"] is None
+        assert local_mod._failure_time > 0.0
+        print("PASS transient failure fails closed; not cached as success")
+    finally:
+        _restore_state(s)
+
+
+def test_failure_not_60s_cached_and_recovers_fast():
+    s = _save_state()
+    try:
+        # Short TTLs: proves recovery needs only the short backoff, not 60s.
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 0.05
+        local_mod.clear_local_cache()
+        holder = {"mode": "fail"}
+
+        async def flaky():
+            if holder["mode"] == "fail":
+                raise local_mod.DiscoveryError("down")
+            return ["qwen3:1.7b"]
+
+        local_mod._fetch_tags = flaky
+        # 1) failure -> closed, success cache untouched
+        assert asyncio.run(local_mod.local_model_ids()) == []
+        assert local_mod._success_cache["models"] is None
+        # 2) recovery after only the short backoff expires
+        holder["mode"] = "ok"
+        time.sleep(0.1)
+        ids = asyncio.run(local_mod.local_model_ids())
+        assert ids == ["local:qwen3:1.7b"], ids
+        print("PASS failure not cached as 60s success; recovers after short backoff")
+    finally:
+        _restore_state(s)
+
+
+def test_valid_empty_200_is_successful_empty():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 4.0
+        local_mod.clear_local_cache()
+        local_mod._fetch_tags = _fake_fetch([])  # valid 200 {"models": []}
+        ids = asyncio.run(local_mod.local_model_ids())
+        assert ids == []
+        # Valid empty is a SUCCESS cache entry, not a failure.
+        assert local_mod._success_cache["models"] == []
+        assert local_mod._failure_time == 0.0
+        print('PASS valid HTTP 200 {"models": []} treated as successful-empty')
+    finally:
+        _restore_state(s)
+
+
+def test_success_caches_normally():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 4.0
+        local_mod.clear_local_cache()
+        calls = {"n": 0}
+
+        async def counting():
+            calls["n"] += 1
+            return ["qwen3:1.7b"]
+
+        local_mod._fetch_tags = counting
+        for _ in range(4):
+            asyncio.run(local_mod.local_model_ids())
+        assert calls["n"] == 1, calls["n"]
+        print("PASS successful discovery caches normally (1 fetch / 4 calls)")
+    finally:
+        _restore_state(s)
+
+
+def test_concurrent_refreshes_deduplicated():
+    s = _save_state()
+    try:
+        local_mod.DISCOVERY_CACHE_TTL = 60.0
+        local_mod.FAILURE_TTL = 4.0
+        local_mod.clear_local_cache()
+        calls = {"n": 0}
+
+        async def slow_counting():
+            calls["n"] += 1
+            await asyncio.sleep(0.05)
+            return ["qwen3:1.7b"]
+
+        local_mod._fetch_tags = slow_counting
+
+        async def run():
+            return await asyncio.gather(*[local_mod.local_model_ids() for _ in range(10)])
+
+        results = asyncio.run(run())
+        assert all(r == ["local:qwen3:1.7b"] for r in results)
+        assert calls["n"] == 1, calls["n"]
+        print("PASS concurrent local discovery => 1 fetch (deduplicated)")
+    finally:
+        _restore_state(s)
+
+
+def test_models_endpoint_no_store_headers():
+    s = _save_state()
+    try:
+        local_mod._fetch_tags = _fake_fetch(["qwen3:1.7b"])
+        local_mod.clear_local_cache()
+        r = client.get("/v1/models")
+        assert r.status_code == 200
+        cc = r.headers.get("cache-control", "").lower()
+        assert "no-store" in cc, cc
+        assert "no-cache" in cc, cc
+        assert "max-age=0" in cc, cc
+        assert r.headers.get("pragma", "").lower() == "no-cache", r.headers.get("pragma")
+        print("PASS /v1/models sends Cache-Control: no-store, Pragma: no-cache")
     finally:
         _restore_state(s)
 

@@ -179,7 +179,7 @@
     var errBox = el("model-rail-error");
     setError("model-rail-error", null);
     try {
-      var r = await fetch(API_BASE + "/models");
+      var r = await fetch(API_BASE + "/models", { cache: "no-store" });
       if (!r.ok) throw new Error("HTTP " + r.status);
       var d = await r.json();
       MODELS = (d.data || []).map(function (m) {

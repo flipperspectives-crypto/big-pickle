@@ -4,7 +4,7 @@ import json
 import logging
 import os
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -99,7 +99,17 @@ def _customer_key(authorization: str | None, x_api_key: str | None) -> dict:
 
 
 @app.get("/v1/models")
-async def models(authorization: str | None = Header(None), x_api_key: str | None = Header(None)):
+async def models(
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None),
+    response: Response = None,
+):
+    # Always serve a fresh catalog: the model list changes when the local Ollama
+    # install changes, and a stale browser/proxy cache would hide newly
+    # discovered local models. Never expose private data here.
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
     if authorization or x_api_key:
         _customer_key(authorization, x_api_key)
     data = []

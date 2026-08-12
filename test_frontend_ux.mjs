@@ -10,13 +10,15 @@ import vm from "vm";
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const code = fs.readFileSync(path.join(__dirname, "static", "app.js"), "utf8");
 
-// Realistic catalog returned by GET /v1/models.
+// Realistic catalog returned by GET /v1/models. Includes a discovered local
+// model whose id uses the colon convention (local:<exact-tag>).
 const MODEL_FIXTURE = [
   { id: "openai/gpt-4o", local: false, providers: ["openai"] },
   { id: "anthropic/claude-3-opus", local: false, providers: ["anthropic"] },
   { id: "google/gemini-1.5-pro", local: false, providers: ["google"] },
   { id: "local/llama-3-8b", local: true, providers: ["ollama"] },
   { id: "local/mistral-7b", local: true, providers: ["ollama"] },
+  { id: "local:qwen3:1.7b", local: true, providers: ["ollama"] },
 ];
 
 function makeEl() {
@@ -98,7 +100,9 @@ const document = {
   body: makeEl(),
 };
 
-function fetchStub(u) {
+const fetchCalls = [];
+function fetchStub(u, init) {
+  fetchCalls.push({ url: String(u), init: init || {} });
   return Promise.resolve({
     ok: true, status: 200,
     json: async () => {
@@ -230,6 +234,21 @@ const freshTarget = firstOptWith("anthropic/claude-3-opus");
 check("target option present after re-render", !!freshTarget);
 clickOpt(freshTarget);
 check("click on re-rendered node -> label updates", label.textContent === "anthropic/claude-3-opus");
+
+/* ---- browser model-catalog caching fix ---- */
+const modelsCall = fetchCalls.find((c) => c.url.includes("/models"));
+check("frontend requests /v1/models with cache: no-store", !!modelsCall && modelsCall.init.cache === "no-store");
+
+/* CHECK 6: local model local:qwen3:1.7b is discoverable, searchable, LOCAL $0. */
+openDropdown();
+const qwenOpt = firstOptWith("local:qwen3:1.7b");
+check("local:qwen3:1.7b discoverable in selector", !!qwenOpt);
+check("rendered local option carries LOCAL · $0 badge", optionsBox.innerHTML.includes("LOCAL · $0"));
+search.value = "qwen3"; search.dispatch("input");
+const filteredQwen = firstOptWith("local:qwen3:1.7b");
+check("search 'qwen3' narrows to local:qwen3:1.7b", !!filteredQwen && opts().length === 1);
+clickOpt(filteredQwen);
+check("search qwen3 -> selects local:qwen3:1.7b with LOCAL $0", label.textContent === "local:qwen3:1.7b");
 
 console.log(failures === 0 ? "\nALL FRONTEND UX CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
