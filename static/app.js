@@ -7,10 +7,50 @@
   var API_BASE = ORIGIN + "/v1";
   var REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  /* Last key created this session (never persisted, never logged). */
+  /* Last key created this session (in memory only — never persisted, never logged). */
   var sessionKey = "";
+  var lastBalance = null;
 
-  /* ---------- helpers ---------- */
+  /* =========================================================================
+     Pure helpers (exposed on window.ClarityUX for verification/tests)
+     ========================================================================= */
+  var PG_STATE_LABELS = {
+    ready: "Ready",
+    busy: "Running",
+    success: "Success",
+    insufficient: "Insufficient balance",
+    unavailable: "Unavailable",
+    error: "Error"
+  };
+
+  function mapPlaygroundState(status) {
+    if (status === 200) return "success";
+    if (status === 402) return "insufficient";
+    if (status === 401 || status === 403) return "error";
+    if (status === 404 || status === 422 || status === 503 || status === 504) return "unavailable";
+    if (status >= 500) return "error";
+    return "error";
+  }
+
+  /* Strip anything that looks like a hostname/URL so provider probe reasons can
+     never leak internal hostnames or upstream URLs into the UI. */
+  function safeReason(reason) {
+    if (!reason) return "";
+    return String(reason)
+      .replace(/https?:\/\/[^\s"'`,;<>()]+/gi, "[host]")
+      .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, "[host]")
+      .replace(/\b[a-z0-9_-]+(?:\.[a-z0-9_-]+){1,}\.(?:com|net|org|io|ai|sh|dev|local|internal|example)\b/gi, "[host]");
+  }
+
+  window.ClarityUX = {
+    mapPlaygroundState: mapPlaygroundState,
+    safeReason: safeReason,
+    PG_STATE_LABELS: PG_STATE_LABELS
+  };
+
+  /* =========================================================================
+     DOM helpers
+     ========================================================================= */
   function el(id) { return document.getElementById(id); }
 
   function escapeHtml(s) {
@@ -50,7 +90,6 @@
     }
   }
 
-  /* Client-side round-trip time measured honestly around the request. */
   function roundTripMs(start) {
     var ms = performance.now() - start;
     return ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s";
@@ -77,7 +116,9 @@
     }
   }
 
-  /* ---------- nav ---------- */
+  /* =========================================================================
+     Nav
+     ========================================================================= */
   var nav = el("nav");
   var navToggle = el("nav-toggle");
   var navLinks = el("nav-links");
@@ -97,7 +138,9 @@
     }
   });
 
-  /* ---------- health ---------- */
+  /* =========================================================================
+     Health
+     ========================================================================= */
   async function checkHealth() {
     var dot = el("nav-status-dot");
     var text = el("nav-status-text");
@@ -118,7 +161,6 @@
     }
   }
 
-  /* ---------- metrics ---------- */
   function setMetric(id, value, cls, sub) {
     var m = el(id);
     if (!m) return;
@@ -127,7 +169,9 @@
     if (sub && m.nextElementSibling) m.nextElementSibling.textContent = sub;
   }
 
-  /* ---------- models ---------- */
+  /* =========================================================================
+     Models
+     ========================================================================= */
   var MODELS = [];
 
   async function loadModels() {
@@ -203,7 +247,9 @@
     setMetric("m-cloud", cloud > 0 ? String(Object.keys(providers).length) : "—", cloud ? "" : "", "providers behind the gateway");
   }
 
-  /* ---------- model selector (combobox) ---------- */
+  /* =========================================================================
+     Model selector (combobox)
+     ========================================================================= */
   var trigger = el("pg-model-trigger");
   var menu = el("pg-model-menu");
   var search = el("pg-model-search");
@@ -337,7 +383,9 @@
     if (!menu.hidden && !menu.contains(e.target) && e.target !== trigger) closeMenu();
   });
 
-  /* ---------- signup ---------- */
+  /* =========================================================================
+     Signup + key masking
+     ========================================================================= */
   var signupForm = el("signup-form");
   var signupBtn = el("signup-btn");
 
@@ -358,15 +406,14 @@
         throw new Error(d.detail || ("HTTP " + r.status + (d.message ? " — " + d.message : "")));
       }
       if (!d.skey) throw new Error("Backend returned no key.");
-      sessionKey = d.skey;
-      el("signup-skey").value = d.skey;
+      sessionKey = d.skey;                       // in-memory only
+      var skeyInput = el("signup-skey");
+      skeyInput.type = "password";               // masked by default
+      skeyInput.value = d.skey;
       el("key-reveal").classList.add("on");
-      el("topup-key").value = d.skey;
+      el("pg-key").value = d.skey;               // convenience; field is type=password
       signupForm.reset();
       refreshBalance(d.skey);
-      if (d.stripe_enabled) {
-        setError("topup-error", null);
-      }
     } catch (err) {
       setError("signup-error", err.message || "Could not create the key. Try again.");
     } finally {
@@ -374,11 +421,28 @@
     }
   });
 
+  /* Show/Hide toggle for the newly created key (masked by default). */
+  el("key-show-toggle").addEventListener("click", function () {
+    var input = el("signup-skey");
+    var btn = this;
+    var show = input.type === "password";
+    input.type = show ? "text" : "password";
+    btn.textContent = show ? "Hide" : "Show";
+    btn.setAttribute("aria-pressed", show ? "true" : "false");
+  });
+
   el("copy-skey").addEventListener("click", function () {
     copyText(el("signup-skey").value, this);
   });
 
-  /* ---------- balance ---------- */
+  /* =========================================================================
+     Balance + first-run hint
+     ========================================================================= */
+  function showFirstRun(show) {
+    var b = el("pg-firstrun");
+    if (b) b.hidden = !show;
+  }
+
   async function refreshBalance(key) {
     if (!key) return;
     try {
@@ -387,11 +451,15 @@
       if (r.ok && typeof d.balance_usd === "number") {
         el("balance-row").hidden = false;
         el("balance-value").textContent = "$" + d.balance_usd.toFixed(2);
+        lastBalance = d.balance_usd;
+        showFirstRun(d.balance_usd <= 0);
       }
     } catch (e) { /* silent — balance is auxiliary */ }
   }
 
-  /* ---------- top up (Stripe checkout) ---------- */
+  /* =========================================================================
+     Top up (Stripe checkout)
+     ========================================================================= */
   function bestKey() {
     var fromTopup = el("topup-key").value.trim();
     var fromPg = el("pg-key").value.trim();
@@ -440,7 +508,21 @@
     });
   });
 
-  /* ---------- playground ---------- */
+  el("pg-topup-cta").addEventListener("click", function () {
+    var key = bestKey();
+    if (!key) { document.querySelector("#credentials").scrollIntoView({ behavior: REDUCED_MOTION ? "auto" : "smooth" }); return; }
+    setBtnLoading(this, true, "Opening…");
+    startCheckout(key).finally(function () { setBtnLoading(el("pg-topup-cta"), false); });
+  });
+
+  function showTopupCta(show) {
+    var b = el("pg-topup-cta");
+    if (b) b.hidden = !show;
+  }
+
+  /* =========================================================================
+     Playground
+     ========================================================================= */
   var pgRun = el("pg-run");
   var pgOutput = el("pg-output");
   var pgMeta = el("pg-meta");
@@ -450,7 +532,7 @@
     if (!state) { pgStatus.hidden = true; pgStatus.className = "out-badge"; pgStatus.textContent = ""; return; }
     pgStatus.hidden = false;
     pgStatus.className = "out-badge " + state;
-    pgStatus.textContent = label;
+    pgStatus.textContent = label || PG_STATE_LABELS[state] || "Status";
   }
 
   pgRun.addEventListener("click", runInference);
@@ -460,6 +542,7 @@
     setError("pg-error", null);
     setPgStatus(null);
     pgMeta.hidden = true;
+    showTopupCta(false);
     el("pg-copy").hidden = true;
   });
   el("pg-copy").addEventListener("click", function () {
@@ -468,6 +551,7 @@
 
   async function runInference() {
     setError("pg-error", null);
+    showTopupCta(false);
     var key = el("pg-key").value.trim();
     if (!key) { setError("pg-error", "Enter your API key."); el("pg-key").focus(); return; }
     if (!selectedModel) { setError("pg-error", "Select a model from the list."); return; }
@@ -475,7 +559,7 @@
     if (!prompt) { setError("pg-error", "Write a prompt first."); return; }
 
     setBtnLoading(pgRun, true, "Routing request…");
-    setPgStatus("busy", "Running");
+    setPgStatus("busy", PG_STATE_LABELS.busy);
     pgOutput.textContent = "";
     pgOutput.classList.add("placeholder");
     pgOutput.textContent = "Request in flight…";
@@ -491,13 +575,22 @@
       });
       var d = await r.json().catch(function () { return {}; });
       if (!r.ok) {
-        var msg = d.detail || ("HTTP " + r.status + (d.message ? " — " + d.message : ""));
-        if (r.status === 402) {
-          msg = "402 — Insufficient balance. Top up credits to use cloud models (local models are free).";
-        } else if (r.status === 401) {
+        var status = r.status;
+        var state = mapPlaygroundState(status);
+        var msg;
+        if (state === "insufficient") {
+          msg = "402 — Insufficient balance. Local models are free when you bring your own Ollama; for cloud models, top up credits to continue.";
+        } else if (status === 401) {
           msg = "Invalid API key. Check the key and try again.";
+        } else if (state === "unavailable") {
+          var isLocal = MODELS.some(function (m) { return m.id === selectedModel && m.local; });
+          msg = isLocal
+            ? "Local model unavailable — make sure your Ollama host is connected to the gateway, then retry."
+            : "Model or provider unavailable right now (HTTP " + status + "). Try another model or retry.";
+        } else {
+          msg = d.detail || ("Request failed (HTTP " + status + ").");
         }
-        throw new Error(msg);
+        throw { state: state, message: msg };
       }
       var content = (d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || "";
       var usage = d.usage || {};
@@ -506,7 +599,7 @@
       pgOutput.textContent = content || "(empty response)";
       pgOutput.classList.remove("placeholder");
       pgOutput.classList.add("reveal");
-      setPgStatus("ready", "Complete");
+      setPgStatus("success", PG_STATE_LABELS.success);
       pgMeta.hidden = false;
       pgMeta.innerHTML =
         '<span><b>model</b> ' + escapeHtml(d.model || selectedModel) + "</span>" +
@@ -516,16 +609,20 @@
       el("pg-copy").hidden = false;
       refreshBalance(key);
     } catch (err) {
-      setPgStatus("err", "Error");
-      setError("pg-error", err.message || "Inference failed. The gateway may be unavailable.");
+      var st = (err && err.state) || "error";
+      setPgStatus(st, PG_STATE_LABELS[st] || "Error");
+      setError("pg-error", (err && err.message) || "Inference failed. The gateway may be unavailable.");
       pgOutput.textContent = "Run a request to see the response here.";
       pgOutput.classList.remove("placeholder");
+      showTopupCta(st === "insufficient");
     } finally {
       setBtnLoading(pgRun, false);
     }
   }
 
-  /* ---------- API tabs + copy ---------- */
+  /* =========================================================================
+     API tabs + copy
+     ========================================================================= */
   var pyBase = el("py-base-url");
   var curlBase = el("curl-base-url");
   pyBase.textContent = API_BASE + "/";
@@ -557,12 +654,101 @@
     });
   });
 
-  /* ---------- routing animation ---------- */
+  /* =========================================================================
+     Live status (/v1/status) — evidence-backed, sanitized
+     ========================================================================= */
+  async function loadStatus() {
+    var retryBtn = el("status-retry");
+    if (retryBtn) setBtnLoading(retryBtn, true, "Refreshing…");
+    try {
+      var r = await fetch(API_BASE.replace("/v1", "") + "/v1/status");
+      var data = r.ok ? await r.json().catch(function () { return null; }) : null;
+      renderStatus(data);
+    } catch (e) {
+      renderStatus(null);
+    } finally {
+      if (retryBtn) setBtnLoading(retryBtn, false);
+    }
+  }
+
+  function renderStatus(data) {
+    var dot = el("nav-status-dot");
+    var txt = el("nav-status-text");
+    if (!data) {
+      if (dot) dot.className = "status-dot err";
+      if (txt) txt.textContent = "Status unavailable";
+      return;
+    }
+    if (dot) dot.className = "status-dot ok";
+    if (txt) txt.textContent = "Gateway " + (data.status || "unknown");
+
+    var g = data.gateway || {};
+    var gw = (data.status || "unknown");
+    if (typeof g.active_keys !== "undefined") {
+      gw += " · " + g.active_keys + " keys · $" + (g.total_balance_usd || 0);
+    }
+    var gwEl = el("s-gateway");
+    if (gwEl) gwEl.textContent = gw;
+
+    var provs = data.providers || {};
+    var names = Object.keys(provs);
+    var reachable = 0;
+    names.forEach(function (n) {
+      var p = provs[n] || {};
+      if (p.reachable === true) reachable++;
+    });
+    var pEl = el("s-providers");
+    if (pEl) pEl.textContent = reachable + " / " + names.length;
+
+    var tEl = el("s-timestamp");
+    if (tEl) tEl.textContent = (data.timestamp || "—").replace("Z", "");
+
+    var tbody = el("status-providers");
+    if (tbody) {
+      tbody.innerHTML = "";
+      if (!names.length) {
+        tbody.innerHTML = '<tr><td data-label="Provider" colspan="6" style="text-align:center;color:var(--muted)">No providers configured.</td></tr>';
+      }
+      names.forEach(function (n) {
+        var p = provs[n] || {};
+        var reach = p.reachable === true ? "yes"
+                  : p.reachable === false ? "no"
+                  : "unknown";
+        var creds = p.credentials_configured ? "yes" : "no";
+        var lat = (typeof p.probe_latency_ms === "number") ? p.probe_latency_ms : "—";
+        var reason = safeReason(p.reason);
+        var reasonHtml = reason ? ' <span class="m-sub">(' + escapeHtml(reason) + ")</span>" : "";
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          '<td data-label="Provider"><code>' + escapeHtml(n) + "</code></td>" +
+          '<td data-label="Configured">' + (p.configured ? "yes" : "no") + "</td>" +
+          '<td data-label="Creds set">' + creds + "</td>" +
+          '<td data-label="Reachable">' + reach + reasonHtml + "</td>" +
+          '<td data-label="Latency (ms)">' + lat + "</td>" +
+          '<td data-label="Models">' + (p.models_in_routes || 0) + "</td>";
+        tbody.appendChild(tr);
+      });
+    }
+
+    var note = (data.failover && data.failover.note) ? data.failover.note : "";
+    var nEl = el("status-note");
+    if (nEl) nEl.textContent = note;
+  }
+
+  var statusRetry = el("status-retry");
+  if (statusRetry) statusRetry.addEventListener("click", loadStatus);
+
+  /* =========================================================================
+     Routing animation
+     ========================================================================= */
   if (!REDUCED_MOTION) {
     el("routing").classList.add("routing-anim");
   }
 
-  /* ---------- boot ---------- */
+  /* =========================================================================
+     Boot
+     ========================================================================= */
   checkHealth();
   loadModels();
+  loadStatus();
 })();

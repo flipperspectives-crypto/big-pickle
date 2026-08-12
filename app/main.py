@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import json
-
+import logging
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -30,6 +30,25 @@ from .status import get_status
 from .router import UpstreamError, available_models, run_completion
 
 app = FastAPI(title="Clarity", version="0.1.0")
+
+logger = logging.getLogger("clarity")
+
+
+def _public_upstream_message(status: int, reason: str | None) -> str:
+    # Safe, client-facing text derived ONLY from the status code and a short,
+    # non-sensitive reason code. Never includes raw upstream bodies, provider
+    # keys, internal hostnames, or exception text.
+    if reason == "network_error":
+        return "The provider could not be reached (network error). Please retry."
+    if status == 401 or status == 403:
+        return "The upstream provider rejected the request (auth)."
+    if status == 404:
+        return "That model is not available from any configured provider."
+    if status == 429:
+        return "The provider is rate-limiting requests right now. Please retry shortly."
+    if 500 <= status < 600:
+        return "The provider is temporarily unavailable. Please retry or try another model."
+    return "The provider returned an error. Please retry or try another model."
 
 app.add_middleware(
     CORSMiddleware,
@@ -117,9 +136,17 @@ async def chat_completions(
     try:
         data, _cost, _provider = await run_completion(body, key["id"])
     except UpstreamError as e:
-        raise HTTPException(e.status, e.detail)
+        # Log ONLY sanitized metadata. Never log raw upstream bodies, provider
+        # keys, Authorization headers/tokens, internal URLs/hosts, or stack traces.
+        logger.warning(
+            "upstream_error provider=%s status=%s exc=%s reason=%s",
+            e.provider, e.status, type(e).__name__, e.reason,
+        )
+        raise HTTPException(e.status, _public_upstream_message(e.status, e.reason))
     except Exception as e:
-        raise HTTPException(502, f"gateway error: {e}")
+        # Log the exception CLASS only (no message text, no stack trace, no secrets).
+        logger.warning("completion_failed exc=%s", type(e).__name__)
+        raise HTTPException(502, "Gateway error. Please retry or try another model.")
     if hasattr(data, "__aiter__"):
         return StreamingResponse(data, media_type="text/event-stream")
     return data
@@ -241,7 +268,8 @@ async def create_checkout(
             cancel_url=f"{base}/",
         )
     except Exception as e:
-        raise HTTPException(502, f"stripe checkout failed: {e}")
+        logger.warning("stripe_checkout_failed exc=%s", type(e).__name__)
+        raise HTTPException(502, "Stripe checkout failed. Please try again later.")
     return {"url": session.url, "amount_usd": settings.STRIPE_PRICE_USD}
 
 

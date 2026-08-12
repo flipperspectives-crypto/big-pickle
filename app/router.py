@@ -10,10 +10,30 @@ _ERR_MARKER = "\x00GWERR\x00"
 
 
 class UpstreamError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str | None = None, *, provider: str | None = None, reason: str | None = None):
+        # `detail` is a SAFE, client-facing message only. Raw upstream response
+        # bodies, provider keys, internal URLs/hosts, and exception text must
+        # NEVER be placed here or logged. `reason` is a short, non-sensitive
+        # reason code; `provider` is the provider name (not a secret).
         self.status = status
-        self.detail = detail
-        super().__init__(f"upstream {status}: {detail}")
+        self.provider = provider
+        self.reason = reason
+        self.detail = detail or _safe_detail(status, reason)
+        super().__init__(f"upstream {status} provider={provider} reason={reason}")
+
+
+def _safe_detail(status: int, reason: str | None) -> str:
+    if reason == "network_error":
+        return "The provider could not be reached (network error). Please retry."
+    if status == 401 or status == 403:
+        return "The upstream provider rejected the request (auth)."
+    if status == 404:
+        return "That model is not available from any configured provider."
+    if status == 429:
+        return "The provider is rate-limiting requests right now. Please retry shortly."
+    if 500 <= status < 600:
+        return "The provider is temporarily unavailable. Please retry or try another model."
+    return "The provider returned an error. Please retry or try another model."
 
 
 def _auth_headers(provider: str) -> dict:
@@ -89,10 +109,11 @@ async def _chat_openai(
         headers["Accept"] = "text/event-stream"
     try:
         r = await client.post(url, headers=headers, json=payload, timeout=120)
-    except httpx.HTTPError as e:
-        raise UpstreamError(502, f"{provider} network error: {e}") from e
+    except httpx.HTTPError:
+        raise UpstreamError(502, provider=provider, reason="network_error")
     if r.status_code >= 400:
-        raise UpstreamError(r.status_code, f"{provider}: {r.text[:400]}")
+        # never include the raw upstream response body
+        raise UpstreamError(r.status_code, provider=provider, reason=f"provider_http_{r.status_code}")
     if stream:
         return _stream_ok(r, provider, payload["model"])
     data = r.json()
@@ -123,10 +144,11 @@ async def _chat_anthropic(
         headers["Accept"] = "text/event-stream"
     try:
         r = await client.post(url, headers=headers, json=payload, timeout=120)
-    except httpx.HTTPError as e:
-        raise UpstreamError(502, f"{provider} network error: {e}") from e
+    except httpx.HTTPError:
+        raise UpstreamError(502, provider=provider, reason="network_error")
     if r.status_code >= 400:
-        raise UpstreamError(r.status_code, f"{provider}: {r.text[:400]}")
+        # never include the raw upstream response body
+        raise UpstreamError(r.status_code, provider=provider, reason=f"provider_http_{r.status_code}")
     if not stream:
         data = r.json()
         pt = data.get("usage", {}).get("input_tokens", 0)
@@ -247,7 +269,7 @@ async def run_completion(body: dict, key_id: str):
                 last_err = e
                 continue
     raise UpstreamError(
-        502, f"all providers failed: {(last_err.detail or '')[:200]}"
+        502, provider=getattr(last_err, "provider", None), reason="all_providers_failed"
     )
 
 

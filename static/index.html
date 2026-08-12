@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Clarity — One OpenAI-compatible inference gateway. Cloud providers and local models, one API key, one balance, automatic failover.">
+<meta name="color-scheme" content="dark">
 <title>Clarity — One API. Every model.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='7'%20fill='%23050505'/%3E%3Ccircle%20cx='16'%20cy='16'%20r='5'%20fill='%23ff7a18'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;750&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -27,6 +29,7 @@
       <a href="#pricing">Pricing</a>
       <a href="#playground">Playground</a>
       <a href="#api">API</a>
+      <a href="#local">Local</a>
       <a href="#docs">Docs</a>
       <a href="#status">Status</a>
     </nav>
@@ -121,8 +124,8 @@
         <div class="price-card">
           <div class="pc-name">Local</div>
           <div class="pc-price">$0 <small>forever</small></div>
-          <div class="pc-desc">Run supported self-hosted models through the same API at zero cost. No cloud billing for local traffic.</div>
-          <a class="btn btn-ghost pc-cta" href="#playground">Try a local model</a>
+          <div class="pc-desc">Run supported self-hosted models through the same API at zero cost. Local models run on <b>your</b> Ollama/local host — not on Clarity's cloud — so there is no cloud billing for local traffic.</div>
+          <a class="btn btn-ghost pc-cta" href="#local">Set up local</a>
           <div class="pc-meta">Local models are billed at <b class="pc-num">$0</b>.</div>
         </div>
       </div>
@@ -151,12 +154,17 @@
 
         <div class="key-reveal" id="key-reveal">
           <div class="kr-title">Your API key</div>
-          <div class="kr-note">Store it somewhere safe. It is shown once and is the only credential you need.</div>
+          <div class="kr-note">Shown once. Store it somewhere safe — it is the only credential you need. It is masked by default.</div>
           <div class="keybox">
-            <input class="input mono" type="text" id="signup-skey" readonly aria-label="Generated API key">
+            <input class="input mono" type="password" id="signup-skey" readonly aria-label="Generated API key" autocomplete="off">
+            <button class="btn btn-sm btn-ghost" type="button" id="key-show-toggle" aria-pressed="false">Show</button>
             <button class="btn btn-sm" type="button" id="copy-skey">Copy</button>
           </div>
-          <div class="kr-warn">Never share this key or commit it to a repository.</div>
+          <div class="kr-warn">Never share this key or commit it to a repository. It is never stored in your browser or written to logs.</div>
+          <div class="kr-firstrun" id="kr-firstrun">
+            Starts at <b>$0</b>. Local models are free when you bring your own Ollama; cloud models need a top-up.
+            <a href="#local">Set up local →</a>
+          </div>
         </div>
 
         <div class="balance-row" id="balance-row" hidden>
@@ -167,7 +175,7 @@
         <div class="field" style="margin-top:22px">
           <label for="topup-key">Top up with your existing key</label>
           <div class="keybox">
-            <input class="input mono" type="text" id="topup-key" placeholder="gw_…" autocomplete="off" aria-label="API key for top-up">
+            <input class="input mono" type="password" id="topup-key" placeholder="gw_…" autocomplete="off" aria-label="API key for top-up">
             <button class="btn btn-primary" type="button" id="topup-btn">Top up</button>
           </div>
           <div class="error-panel" id="topup-error" hidden></div>
@@ -182,14 +190,14 @@
       <div class="section-head">
         <div class="section-eyebrow">Playground</div>
         <h2 id="playground-title">Inference console</h2>
-        <p>Real requests against the live gateway. Pick any model from the catalog and run it.</p>
+        <p>Real requests against the live gateway. Pick any model from the catalog and run it. Results come straight from the provider — nothing here is simulated.</p>
       </div>
       <div class="console">
         <div class="console-panel">
           <h3>Request</h3>
           <div class="field">
             <label for="pg-key">API key</label>
-            <input class="input mono" type="text" id="pg-key" placeholder="gw_…" autocomplete="off">
+            <input class="input mono" type="password" id="pg-key" placeholder="gw_…" autocomplete="off" aria-label="API key">
           </div>
           <div class="field">
             <label for="pg-model">Model <span class="hint">— live from /v1/models</span></label>
@@ -208,9 +216,23 @@
             <label for="pg-prompt">Prompt</label>
             <textarea class="input" id="pg-prompt" rows="6" placeholder="Ask something…">Explain Clarity in one sentence.</textarea>
           </div>
+          <div class="firstrun" id="pg-firstrun" hidden>
+            <b>New $0 key?</b> Cloud models need credits — top up to use them. Or run a <b>Local</b> model free by bringing your own Ollama.
+            <a href="#local">How to set up local →</a>
+          </div>
           <button class="btn btn-primary" type="button" id="pg-run">
             <span class="btn-label">Run inference</span>
           </button>
+          <details class="info-panel" id="local-setup">
+            <summary>Run local models free (bring your own Ollama)</summary>
+            <ol>
+              <li>Install Ollama on <b>your</b> machine (see ollama.com).</li>
+              <li>Pull a model, e.g. <code>ollama pull llama3.1:8b</code>.</li>
+              <li>Point Clarity at your Ollama host (set the local base URL in the gateway config).</li>
+              <li>Pick a <b>Local</b> model above and run it. Billed at $0 — no cloud key needed.</li>
+            </ol>
+            <p class="info-note">Local inference runs on your hardware, not on Clarity's servers.</p>
+          </details>
         </div>
         <div class="console-panel">
           <div class="out-head">
@@ -221,11 +243,12 @@
             Run a request to see the response here.
           </div>
           <div class="error-panel" id="pg-error" hidden></div>
-          <div class="out-meta" id="pg-meta" hidden></div>
           <div class="out-actions">
+            <button class="btn btn-sm" type="button" id="pg-topup-cta" hidden>Top up credits</button>
             <button class="btn btn-sm" type="button" id="pg-copy" hidden>Copy response</button>
             <button class="btn btn-sm btn-ghost" type="button" id="pg-clear">Clear</button>
           </div>
+          <div class="out-meta" id="pg-meta" hidden></div>
         </div>
       </div>
     </div>
@@ -277,6 +300,36 @@ curl <span class="hl" id="curl-base-url">…</span> \
     </div>
   </section>
 
+  <!-- LOCAL -->
+  <section class="section" id="local" aria-labelledby="local-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Local · $0</div>
+        <h2 id="local-title">Bring your own local models</h2>
+        <p>Local models run on <b>your</b> machine via Ollama (or any OpenAI-compatible local server) — <b>not</b> on Clarity's cloud. They are billed at $0 through the same API key, with no cloud credentials required.</p>
+      </div>
+      <div class="local-steps">
+        <div class="local-step">
+          <div class="ls-num">1</div>
+          <div class="ls-body"><b>Install Ollama</b> on your own machine. This is the engine that runs the models locally.</div>
+        </div>
+        <div class="local-step">
+          <div class="ls-num">2</div>
+          <div class="ls-body"><b>Pull a model</b> — e.g. <code>ollama pull llama3.1:8b</code>. Any model your Ollama supports works.</div>
+        </div>
+        <div class="local-step">
+          <div class="ls-num">3</div>
+          <div class="ls-body"><b>Connect it</b> — point the gateway at your Ollama base URL (set the local base URL in the gateway config so Clarity can route to it).</div>
+        </div>
+        <div class="local-step">
+          <div class="ls-num">4</div>
+          <div class="ls-body"><b>Run it</b> — pick a <span class="chip local tag">LOCAL · $0</span> model in the Playground and send a request. Billed at $0.</div>
+        </div>
+      </div>
+      <p class="local-note">Because inference happens on your hardware, speed and availability depend on your machine — Clarity only routes and meters the request.</p>
+    </div>
+  </section>
+
   <!-- DOCS / STATUS -->
   <section class="section" id="docs" aria-labelledby="docs-title">
     <div class="wrap">
@@ -312,7 +365,7 @@ curl <span class="hl" id="curl-base-url">…</span> \
         <div class="section-eyebrow">Reference</div>
         <h2>Endpoints</h2>
       </div>
-      <div class="code-card">
+      <div class="table-scroll">
         <table class="api-table">
           <thead>
             <tr><th>Endpoint</th><th>Auth</th><th>Purpose</th></tr>
@@ -336,28 +389,31 @@ curl <span class="hl" id="curl-base-url">…</span> \
       <div class="section-head">
         <div class="section-eyebrow">Status</div>
         <h2 id="status-title">Live gateway status</h2>
-        <p>Pulled live from <code>GET /v1/status</code> — <code>reachable</code> and <code>probe_latency_ms</code> come from a real, zero-cost network probe (any HTTP/TLS response counts, including 401/403). Nothing is hard-coded, estimated, or invented.</p>
+        <p>Pulled live from <code>GET /v1/status</code> — <code>reachable</code> and <code>probe_latency_ms</code> come from a real, zero-cost network probe (any HTTP/TLS response counts, including 401/403). Nothing is hard-coded, estimated, or invented. Latency reflects the probe only; it is not a model inference time.</p>
       </div>
-      <div class="metrics" id="status-metrics">
-        <div class="metric">
-          <div class="m-label">Gateway</div>
-          <div class="m-value" id="s-gateway">—</div>
-          <div class="m-sub">status · active keys · balance</div>
+      <div class="status-head">
+        <div class="metrics" id="status-metrics">
+          <div class="metric">
+            <div class="m-label">Gateway</div>
+            <div class="m-value" id="s-gateway">—</div>
+            <div class="m-sub">status · active keys · balance</div>
+          </div>
+          <div class="metric">
+            <div class="m-label">Providers reachable</div>
+            <div class="m-value" id="s-providers">—</div>
+            <div class="m-sub">live probe · configured behind the gateway</div>
+          </div>
+          <div class="metric">
+            <div class="m-label">Last checked</div>
+            <div class="m-value" id="s-timestamp">—</div>
+            <div class="m-sub">UTC</div>
+          </div>
         </div>
-        <div class="metric">
-          <div class="m-label">Providers reachable</div>
-          <div class="m-value" id="s-providers">—</div>
-          <div class="m-sub">live probe · configured behind the gateway</div>
-        </div>
-        <div class="metric">
-          <div class="m-label">Last checked</div>
-          <div class="m-value" id="s-timestamp">—</div>
-          <div class="m-sub">UTC</div>
-        </div>
+        <button class="btn btn-sm btn-ghost" type="button" id="status-retry" aria-label="Refresh status">Refresh</button>
       </div>
 
-      <div class="code-card" style="margin-top:40px">
-        <table class="api-table">
+      <div class="table-scroll" style="margin-top:40px">
+        <table class="api-table status-table">
           <thead>
             <tr><th>Provider</th><th>Configured</th><th>Creds set</th><th>Reachable</th><th>Latency (ms)</th><th>Models</th></tr>
           </thead>
@@ -379,70 +435,5 @@ curl <span class="hl" id="curl-base-url">…</span> \
 </footer>
 
 <script src="/static/app.js"></script>
-<script>
-(function () {
-  function renderStatus(data) {
-    if (!data) return;
-    var g = data.gateway || {};
-    var gw = (data.status || 'unknown');
-    if (typeof g.active_keys !== 'undefined') {
-      gw += ' · ' + g.active_keys + ' keys · $' + (g.total_balance_usd || 0);
-    }
-    var gwEl = document.getElementById('s-gateway');
-    if (gwEl) gwEl.textContent = gw;
-
-    var provs = data.providers || {};
-    var names = Object.keys(provs);
-    var reachable = 0;
-    names.forEach(function (n) {
-      var p = provs[n] || {};
-      if (p.reachable === true) reachable++;
-    });
-    var pEl = document.getElementById('s-providers');
-    if (pEl) pEl.textContent = reachable + ' / ' + names.length;
-
-    var tEl = document.getElementById('s-timestamp');
-    if (tEl) tEl.textContent = (data.timestamp || '—').replace('Z', '');
-
-    var tbody = document.getElementById('status-providers');
-    if (tbody) {
-      tbody.innerHTML = '';
-      names.forEach(function (n) {
-        var p = provs[n] || {};
-        var reach = p.reachable === true ? 'yes'
-                  : p.reachable === false ? 'no'
-                  : 'unknown';
-        var creds = p.credentials_configured ? 'yes' : 'no';
-        var lat = (typeof p.probe_latency_ms === 'number') ? p.probe_latency_ms : '—';
-        var reason = p.reason ? ' <span class="m-sub">(' + p.reason + ')</span>' : '';
-        var tr = document.createElement('tr');
-        tr.innerHTML = '<td><code>' + n + '</code></td>' +
-          '<td>' + (p.configured ? 'yes' : 'no') + '</td>' +
-          '<td>' + creds + '</td>' +
-          '<td>' + reach + reason + '</td>' +
-          '<td>' + lat + '</td>' +
-          '<td>' + (p.models_in_routes || 0) + '</td>';
-        tbody.appendChild(tr);
-      });
-    }
-
-    var note = (data.failover && data.failover.note) ? data.failover.note : '';
-    var nEl = document.getElementById('status-note');
-    if (nEl) nEl.textContent = note;
-
-    var dot = document.getElementById('nav-status-dot');
-    var txt = document.getElementById('nav-status-text');
-    if (dot) dot.classList.add('ok');
-    if (txt) txt.textContent = 'Gateway ' + (data.status || 'unknown');
-  }
-  fetch('/v1/status')
-    .then(function (r) { return r.ok ? r.json() : null; })
-    .then(renderStatus)
-    .catch(function () {
-      var txt = document.getElementById('nav-status-text');
-      if (txt) txt.textContent = 'Status unavailable';
-    });
-})();
-</script>
 </body>
 </html>

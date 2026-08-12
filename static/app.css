@@ -902,6 +902,111 @@ section { scroll-margin-top: 96px; }
 .footer a { color: var(--text2); }
 .footer a:hover { color: var(--orange-bright); }
 
+/* ---------- Status / tables: responsive + readable on phones ---------- */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-top: 20px;
+}
+.table-scroll .api-table { min-width: 640px; }
+
+.status-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.status-head .metrics { flex: 1; min-width: 240px; }
+
+/* Playground output state badges */
+.out-badge.success { color: var(--success); border: 1px solid rgba(114, 216, 155, 0.35); background: rgba(114, 216, 155, 0.06); }
+.out-badge.insufficient { color: #ffcf6b; border: 1px solid rgba(255, 207, 107, 0.4); background: rgba(255, 207, 107, 0.07); }
+.out-badge.unavailable { color: var(--text2); border: 1px solid var(--border-strong); background: rgba(255, 255, 255, 0.03); }
+
+/* First-run hint banner */
+.firstrun {
+  margin-top: 14px;
+  border: 1px solid rgba(255, 132, 45, 0.28);
+  background: rgba(255, 122, 24, 0.05);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.firstrun a { color: var(--orange-bright); }
+
+/* Local setup panel (details/summary) */
+.info-panel {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: 0;
+}
+.info-panel > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 12px 16px;
+  font: 600 13px var(--font);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.info-panel > summary::-webkit-details-marker { display: none; }
+.info-panel > summary::before {
+  content: "▸";
+  color: var(--orange-bright);
+  transition: transform 160ms var(--ease);
+}
+.info-panel[open] > summary::before { transform: rotate(90deg); }
+.info-panel > ol, .info-panel > p { padding: 0 16px 16px; margin: 0; }
+.info-panel > ol { margin-left: 20px; color: var(--text2); font-size: 13.5px; line-height: 1.7; }
+.info-panel > ol code, .info-panel code { color: var(--orange-bright); font-family: var(--mono); font-size: 12.5px; }
+.info-panel .info-note, .info-panel .info-panel .info-note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+
+/* Local steps */
+.local-steps {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+.local-step {
+  display: flex;
+  gap: 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 20px;
+}
+.local-step .ls-num {
+  flex: none;
+  width: 28px; height: 28px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 122, 24, 0.12);
+  border: 1px solid rgba(255, 132, 45, 0.4);
+  color: var(--orange-bright);
+  font: 700 13px var(--mono);
+}
+.local-step .ls-body { color: var(--text2); font-size: 14px; line-height: 1.6; }
+.local-step .ls-body b { color: var(--text); }
+.local-step .ls-body code { color: var(--orange-bright); font-family: var(--mono); font-size: 12.5px; }
+.local-note { margin-top: 20px; color: var(--muted); font-size: 13px; }
+
+/* Key reveal first-run note */
+.key-reveal .kr-firstrun {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--text2);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card2);
+}
+.key-reveal .kr-firstrun a { color: var(--orange-bright); }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1024px) {
   .pricing-grid { grid-template-columns: repeat(2, 1fr); }
@@ -944,6 +1049,38 @@ section { scroll-margin-top: 96px; }
   .price-card { padding: 24px 20px; }
   .metrics .m-value { font-size: 17px; }
   .brand-sub { display: none; }
+}
+
+/* Stack the /status provider table into readable cards on phones so every
+   column is visible (labels come from data-label set in JS). */
+@media (max-width: 640px) {
+  .local-steps { grid-template-columns: 1fr; }
+  .table-scroll .api-table { min-width: 0; }
+  .status-table thead { display: none; }
+  .status-table, .status-table tbody, .status-table tr, .status-table td { display: block; width: 100%; }
+  .status-table tr {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: 12px;
+    padding: 6px 10px;
+    background: var(--card);
+  }
+  .status-table td {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    border: 0;
+    padding: 8px 4px;
+    text-align: right;
+  }
+  .status-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-weight: 600;
+    text-align: left;
+    flex: none;
+  }
+  .status-table td code { color: var(--orange-bright); }
 }
 
 /* ---------- Reduced motion ---------- */
