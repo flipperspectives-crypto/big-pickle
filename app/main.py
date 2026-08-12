@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from datetime import datetime, timezone
 
 import os
 
@@ -17,6 +18,7 @@ from .db import (
     add_credits,
     balance_for,
     create_key,
+    gateway_status,
     get_key,
     init_db,
     is_charged,
@@ -191,6 +193,47 @@ async def admin_usage(x_admin_key: str | None = Header(None)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/v1/status")
+async def status():
+    """Public, read-only reliability/status surface.
+
+    Reports only evidence-backed runtime information:
+      - gateway health (DB-backed active key count + total balance)
+      - each configured provider's availability (needs_key is a config fact,
+        not an inference probe)
+      - provider model coverage derived from the existing ROUTES table
+    No API keys, secrets, internal tokens, private host info, or sensitive
+    error bodies are returned. No uptime percentages or probe latencies are
+    invented; fields that are not actually measured are clearly noted.
+    """
+    gw = gateway_status()
+    all_providers = (
+        set(providers.OPENAI_COMPATIBLE)
+        | set(providers.ANTHROPIC)
+        | {p for provs in providers.ROUTES.values() for p in provs}
+    )
+    providers_summary = {}
+    for pname in sorted(all_providers):
+        providers_summary[pname] = {
+            "needs_key": providers.needs_key(pname),
+            "configured_models": sum(
+                1 for provs in providers.ROUTES.values() if pname in provs
+            ),
+        }
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "gateway": gw,
+        "providers": providers_summary,
+        "recent_activity": {
+            "note": "no external probe latency recorded in this session; measurement infrastructure not wired"
+        },
+        "failover": {
+            "note": "failover events are tested via mocked providers (test_failover.py); no real-time events recorded without inference"
+        },
+    }
 
 
 @app.post("/v1/x402/topup")

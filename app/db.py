@@ -169,6 +169,28 @@ def balance_for(key_id: str) -> float:
         conn.close()
 
 
+def gateway_status() -> dict:
+    """Evidence-backed gateway health: active key count + total balance.
+
+    Returns only aggregated, non-sensitive aggregates (no secrets, no host
+    info). Used by the public read-only /v1/status endpoint.
+    """
+    conn = _conn()
+    try:
+        active_keys = conn.execute(
+            "SELECT COUNT(*) FROM keys WHERE active = 1"
+        ).fetchone()[0]
+        total_balance = conn.execute(
+            "SELECT COALESCE(SUM(balance), 0) FROM keys WHERE active = 1"
+        ).fetchone()[0]
+        return {
+            "active_keys": active_keys,
+            "total_balance_usd": round(total_balance, 6),
+        }
+    finally:
+        conn.close()
+
+
 def usage_for(key_id: str) -> dict:
     conn = _conn()
     try:

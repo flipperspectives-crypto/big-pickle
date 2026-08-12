@@ -28,6 +28,7 @@
       <a href="#playground">Playground</a>
       <a href="#api">API</a>
       <a href="#docs">Docs</a>
+      <a href="#status">Status</a>
     </nav>
     <div class="nav-status" id="nav-status" role="status" aria-live="polite">
       <span class="status-dot" id="nav-status-dot" aria-hidden="true"></span>
@@ -329,6 +330,45 @@ curl <span class="hl" id="curl-base-url">…</span> \
     </div>
   </section>
 
+  <!-- STATUS -->
+  <section class="section" id="status" aria-labelledby="status-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Status</div>
+        <h2 id="status-title">Live gateway status</h2>
+        <p>Pulled live from <code>GET /v1/status</code> — every value below comes from the backend. Nothing is hard-coded, estimated, or invented.</p>
+      </div>
+      <div class="metrics" id="status-metrics">
+        <div class="metric">
+          <div class="m-label">Gateway</div>
+          <div class="m-value" id="s-gateway">—</div>
+          <div class="m-sub">status · active keys · balance</div>
+        </div>
+        <div class="metric">
+          <div class="m-label">Providers</div>
+          <div class="m-value" id="s-providers">—</div>
+          <div class="m-sub">configured behind the gateway</div>
+        </div>
+        <div class="metric">
+          <div class="m-label">Last checked</div>
+          <div class="m-value" id="s-timestamp">—</div>
+          <div class="m-sub">UTC</div>
+        </div>
+      </div>
+
+      <div class="code-card" style="margin-top:40px">
+        <table class="api-table">
+          <thead>
+            <tr><th>Provider</th><th>Needs key</th><th>Models in routes</th></tr>
+          </thead>
+          <tbody id="status-providers"></tbody>
+        </table>
+      </div>
+
+      <p class="status-note" id="status-note" style="margin-top:18px;color:var(--muted,#7a8290)"></p>
+    </div>
+  </section>
+
 </main>
 
 <footer class="footer">
@@ -339,5 +379,56 @@ curl <span class="hl" id="curl-base-url">…</span> \
 </footer>
 
 <script src="/static/app.js"></script>
+<script>
+(function () {
+  function renderStatus(data) {
+    if (!data) return;
+    var g = data.gateway || {};
+    var gw = (data.status || 'unknown');
+    if (typeof g.active_keys !== 'undefined') {
+      gw += ' · ' + g.active_keys + ' keys · $' + (g.total_balance_usd || 0);
+    }
+    var gwEl = document.getElementById('s-gateway');
+    if (gwEl) gwEl.textContent = gw;
+
+    var provs = data.providers || {};
+    var names = Object.keys(provs);
+    var pEl = document.getElementById('s-providers');
+    if (pEl) pEl.textContent = names.length;
+
+    var tEl = document.getElementById('s-timestamp');
+    if (tEl) tEl.textContent = (data.timestamp || '—').replace('Z', '');
+
+    var tbody = document.getElementById('status-providers');
+    if (tbody) {
+      tbody.innerHTML = '';
+      names.forEach(function (n) {
+        var p = provs[n] || {};
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td><code>' + n + '</code></td>' +
+          '<td>' + (p.needs_key ? 'yes' : 'no') + '</td>' +
+          '<td>' + (p.configured_models || 0) + '</td>';
+        tbody.appendChild(tr);
+      });
+    }
+
+    var note = (data.failover && data.failover.note) ? data.failover.note : '';
+    var nEl = document.getElementById('status-note');
+    if (nEl) nEl.textContent = note;
+
+    var dot = document.getElementById('nav-status-dot');
+    var txt = document.getElementById('nav-status-text');
+    if (dot) dot.classList.add('ok');
+    if (txt) txt.textContent = 'Gateway ' + (data.status || 'unknown');
+  }
+  fetch('/v1/status')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(renderStatus)
+    .catch(function () {
+      var txt = document.getElementById('nav-status-text');
+      if (txt) txt.textContent = 'Status unavailable';
+    });
+})();
+</script>
 </body>
 </html>
