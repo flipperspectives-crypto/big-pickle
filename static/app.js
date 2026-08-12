@@ -298,12 +298,6 @@
 
   function populateSelector() {
     groupAndRender(MODELS);
-    optionsBox.querySelectorAll(".select-opt").forEach(function (opt) {
-      opt.addEventListener("click", function () {
-        chooseModel(opt.dataset.model, opt);
-        closeMenu();
-      });
-    });
     optionsBox.addEventListener("mousemove", function (e) {
       var opt = e.target.closest(".select-opt");
       if (opt) setActive(Number(opt.dataset.i), false);
@@ -357,12 +351,6 @@
   search.addEventListener("input", function () {
     var list = filteredModels(search.value);
     groupAndRender(list);
-    optionsBox.querySelectorAll(".select-opt").forEach(function (opt) {
-      opt.addEventListener("click", function () {
-        chooseModel(opt.dataset.model, opt);
-        closeMenu();
-      });
-    });
     if (visibleOpts.length) setActive(0, false);
   });
   search.addEventListener("keydown", function (e) {
@@ -381,6 +369,14 @@
   });
   document.addEventListener("click", function (e) {
     if (!menu.hidden && !menu.contains(e.target) && e.target !== trigger) closeMenu();
+  });
+
+  optionsBox.addEventListener("click", function (e) {
+    var opt = e.target.closest(".select-opt");
+    if (opt) {
+      chooseModel(opt.dataset.model, opt);
+      closeMenu();
+    }
   });
 
   /* =========================================================================
