@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS stripe_charges (
     amount_usd REAL NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS x402_settlements (
+    payment_id TEXT PRIMARY KEY,
+    payer TEXT NOT NULL,
+    tx_hash TEXT,
+    network TEXT,
+    asset TEXT,
+    amount_usd REAL NOT NULL,
+    key_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -234,3 +244,50 @@ def mark_charged(session_id: str, key_id: str, amount_usd: float) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def settle_x402_credit(
+    payment_id: str,
+    payer: str,
+    transaction: str | None,
+    network: str,
+    asset: str,
+    amount_usd: float,
+    key_id: str,
+) -> bool:
+    """Atomically record an x402 settlement and credit the gateway key.
+
+    Returns True only on the first (ledger-inserting) call. A replay of the
+    exact same payment reuses ``payment_id`` and returns False, so the gateway
+    balance can never be credited twice for one on-chain settlement.
+    """
+    with _lock:
+        conn = _conn()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO x402_settlements "
+                "(payment_id, payer, tx_hash, network, asset, amount_usd, key_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (payment_id, payer, transaction, network, asset, amount_usd, key_id, now),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.execute(
+                "UPDATE keys SET balance = balance + ? WHERE id = ?", (amount_usd, key_id)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+
+def get_x402_settlement(payment_id: str) -> dict | None:
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM x402_settlements WHERE payment_id = ?", (payment_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()

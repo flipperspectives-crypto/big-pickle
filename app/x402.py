@@ -10,13 +10,20 @@ Implements a protected ``POST /v1/x402/topup`` endpoint using the official
 2. Payer signs an EIP-3009 ``transferWithAuthorization`` (USDC) and retries with
    the ``PAYMENT-SIGNATURE`` header.
 3. The x402 FastAPI middleware verifies AND settles via the official x402.org
-   test facilitator on Base Sepolia. On success the handler credits a gateway
-   key (one deterministic key per payer address) and returns it.
+   test facilitator on Base Sepolia.
+4. Only AFTER a successful settlement does the ``after_settle`` hook credit a
+   gateway key (one deterministic key per payer address). The credit is recorded
+   in a persistent settlement ledger keyed by a payment identifier, so a payment
+   can never credit the balance twice (even on replay).
 
-The gateway receiving wallet (``X402_PAYTO``) receives the USDC. Settlement is
-performed by the facilitator, not this process.
+Atomicity: the gateway balance is credited ONLY inside the post-settlement
+success hook, never in the request handler. If verification succeeds but
+settlement fails, the handler still runs (creating an unfunded key) but the
+response is discarded (402) and no credit is recorded.
 """
 
+import hashlib
+import json
 import logging
 
 from fastapi import Request
@@ -28,7 +35,12 @@ from x402.http.types import PaymentOption, RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
 from .config import settings
-from .db import add_credits, balance_for, create_key, get_key_by_name
+from .db import (
+    balance_for,
+    create_key,
+    get_key_by_name,
+    settle_x402_credit,
+)
 
 log = logging.getLogger("x402")
 
@@ -70,6 +82,69 @@ def build_topup_route() -> RouteConfig:
     )
 
 
+def _payment_id(payer: str, inner: dict, network: str, amount: str) -> str:
+    auth = inner.get("authorization") or {}
+    nonce = auth.get("nonce") or json.dumps(inner, sort_keys=True)
+    return hashlib.sha256(
+        f"{payer}|{nonce}|{network}|{amount}".encode()
+    ).hexdigest()
+
+
+def _after_settle(context) -> None:
+    """Credit the gateway key ONLY after a successful settlement.
+
+    Runs exclusively on settlement success (the x402 middleware never invokes
+    after_settle on settlement failure). The ledger makes the credit idempotent:
+    replaying the exact same payment reuses the same payment_id and is skipped.
+    """
+    payload = getattr(context, "payment_payload", None)
+    requirements = getattr(context, "requirements", None)
+    result = getattr(context, "result", None)
+    if payload is None or requirements is None or result is None:
+        return
+
+    inner = getattr(payload, "payload", None) or {}
+    auth = inner.get("authorization") or {}
+    payer = (auth.get("from") or getattr(result, "payer", None) or "").lower()
+    if not payer:
+        log.warning("x402 after_settle: missing payer; skipping credit")
+        return
+
+    network = getattr(requirements, "network", settings.X402_CHAIN_ID)
+    asset = getattr(requirements, "asset", _USDC_BASE_SEPOLIA)
+    amount_atomic = getattr(requirements, "amount", "0")
+    try:
+        amount_usd = int(amount_atomic) / 1_000_000
+    except (ValueError, TypeError):
+        amount_usd = float(settings.X402_PRICE_USD)
+
+    payment_id = _payment_id(payer, inner, network, amount_atomic)
+    key = get_or_create_payer_key(payer)
+    credited = settle_x402_credit(
+        payment_id=payment_id,
+        payer=payer,
+        transaction=getattr(result, "transaction", None),
+        network=network,
+        asset=asset,
+        amount_usd=amount_usd,
+        key_id=key["id"],
+    )
+    if credited:
+        log.info(
+            "x402 settled %s for payer %s -> key %s (+$%.4f)",
+            getattr(result, "transaction", "?"),
+            payer,
+            key["id"],
+            amount_usd,
+        )
+    else:
+        log.info(
+            "x402 settlement already recorded (replay/dup) payment_id=%s payer=%s",
+            payment_id[:16],
+            payer,
+        )
+
+
 def build_x402_middleware(
     facilitator_client=None,
     server=None,
@@ -86,6 +161,7 @@ def build_x402_middleware(
     if server is None:
         server = x402ResourceServer(facilitator_client)
         server.register(settings.X402_CHAIN_ID, ExactEvmServerScheme())
+    server.on_after_settle(_after_settle)
     routes = {"/v1/x402/topup": build_topup_route()}
     return payment_middleware(
         routes, server, sync_facilitator_on_start=sync_facilitator_on_start
@@ -98,7 +174,6 @@ async def x402_topup(request: Request):
         return JSONResponse(status_code=400, content={"error": "missing payer in payment"})
     key = get_or_create_payer_key(payer)
     amount = float(settings.X402_PRICE_USD)
-    add_credits(key["id"], amount)
     return {
         "id": key["id"],
         "skey": key["skey"],
@@ -108,5 +183,5 @@ async def x402_topup(request: Request):
         "scheme": "exact",
         "asset": _USDC_BASE_SEPOLIA,
         "payer": payer,
-        "message": "Gateway key funded. Use `skey` as Bearer token for /v1/chat/completions.",
+        "message": "Key funded after successful settlement; verify balance via /v1/usage.",
     }
