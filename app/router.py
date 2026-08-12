@@ -5,6 +5,7 @@ import httpx
 from . import providers
 from .config import settings
 from .db import record_usage
+from .local import local_model_ids
 
 _ERR_MARKER = "\x00GWERR\x00"
 
@@ -273,5 +274,9 @@ async def run_completion(body: dict, key_id: str):
     )
 
 
-def available_models() -> list[str]:
-    return sorted(providers.ROUTES.keys())
+async def available_models() -> list[str]:
+    # Cloud/canonical routes, minus the stale legacy local aliases which are no
+    # longer advertised (only actually-discovered `local:<tag>` models are).
+    advertised = {m for m in providers.ROUTES if m not in providers.LEGACY_LOCAL_ALIASES}
+    local = set(await local_model_ids())
+    return sorted(advertised | local)

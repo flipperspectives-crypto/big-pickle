@@ -46,6 +46,14 @@ PRICING = {
     },
 }
 
+# Stale, hand-authored local aliases. These were never real installed Ollama
+# tags, so they must NOT be advertised in /v1/models (which now lists only
+# actually-discovered `local:<tag>` models). They are kept in ROUTES so that a
+# request naming one of them still routes literally to Ollama (e.g. "lucy" is
+# sent upstream as "lucy", never remapped to an arbitrary installed model), but
+# they are hidden from discovery. See available_models().
+LEGACY_LOCAL_ALIASES = {"qwen2.5-0.5b", "qwen2.5-3b", "lucy", "lucy-light", "llama-3.2"}
+
 # canonical model name -> ordered provider list to try (failover)
 ROUTES = {
     "llama-3.3-70b": ["groq", "cerebras", "deepinfra", "huggingface"],
@@ -102,7 +110,10 @@ OPENAI_COMPATIBLE = {
     "huggingface": "https://router.huggingface.co/v1",
     "openai": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
-    "local": "http://127.0.0.1:11434/v1",
+    # "local" is present so the `:`-prefix routing in providers_for() works,
+    # but its base URL is resolved at request time from settings.OLLAMA_BASE_URL
+    # (see base_url()). The literal here is intentionally blank.
+    "local": "",
 }
 
 ANTHROPIC = {"anthropic": "https://api.anthropic.com/v1"}
@@ -142,7 +153,20 @@ def is_openai_compatible(provider: str) -> bool:
     return provider in OPENAI_COMPATIBLE
 
 
+def ollama_api_url(path: str) -> str:
+    """Build a discovery/version URL against the configured Ollama endpoint.
+
+    Trailing slashes are stripped safely so callers can pass bare paths like
+    "api/tags" or "/api/tags" without producing double slashes.
+    """
+    root = settings.OLLAMA_BASE_URL.rstrip("/")
+    return root + "/" + (path or "").lstrip("/")
+
+
 def base_url(provider: str) -> str:
+    if provider == "local":
+        # OpenAI-compatible local chat resolves to <OLLAMA_BASE_URL>/v1.
+        return settings.OLLAMA_BASE_URL.rstrip("/") + "/v1"
     return OPENAI_COMPATIBLE.get(provider, ANTHROPIC.get(provider, ""))
 
 

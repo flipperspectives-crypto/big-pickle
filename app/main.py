@@ -103,7 +103,7 @@ async def models(authorization: str | None = Header(None), x_api_key: str | None
     if authorization or x_api_key:
         _customer_key(authorization, x_api_key)
     data = []
-    for m in available_models():
+    for m in await available_models():
         ps = providers.providers_for(m)
         data.append({
             "id": m,

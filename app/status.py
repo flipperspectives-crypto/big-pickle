@@ -94,7 +94,7 @@ async def _provider_probe(provider: str):
     """Per-provider probe. Local Ollama is never guessed: it is explicitly
     false when its local health endpoint is not reachable."""
     if provider == "local":
-        ok, latency, reason = await _probe("http://127.0.0.1:11434/api/version")
+        ok, latency, reason = await _probe(providers.ollama_api_url("api/version"))
         if ok is True:
             return True, latency, None
         return False, latency, (reason or "ollama not running")
