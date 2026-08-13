@@ -850,7 +850,7 @@
   }
 
   (function loadCapabilities() {
-    fetch(API_BASE + "/v1/capabilities", { cache: "no-store" })
+    fetch(API_BASE + "/capabilities", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(applyCapabilities)
       .catch(function () { applyCapabilities(null); }); // fail closed

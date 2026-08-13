@@ -137,3 +137,32 @@ def test_null_or_error_leaves_controls_disabled():
     html = _html()
     assert "disabled" in re.search(r'<input[^>]*id="signup-name"[^>]*>', html).group(0)
     assert "disabled" in re.search(r'<button[^>]*id="signup-btn"[^>]*>', html).group(0)
+
+
+def test_api_base_already_contains_v1():
+    import pathlib, re
+    src = pathlib.Path(__file__).parent.joinpath("static", "app.js").read_text()
+    m = re.search(r'API_BASE\s*=\s*[^;]*', src)
+    assert m, "API_BASE definition not found"
+    assert '"/v1"' in m.group(0), "API_BASE must already include /v1"
+
+
+def test_capabilities_fetch_uses_api_base_plus_capabilities():
+    import pathlib
+    src = pathlib.Path(__file__).parent.joinpath("static", "app.js").read_text()
+    assert 'fetch(API_BASE + "/capabilities"' in src
+
+
+def test_no_double_v1_capabilities_path():
+    import pathlib
+    src = pathlib.Path(__file__).parent.joinpath("static", "app.js").read_text()
+    assert "/v1/v1/capabilities" not in src
+
+
+def test_fail_closed_behavior_unchanged_after_path_fix():
+    import pathlib
+    src = pathlib.Path(__file__).parent.joinpath("static", "app.js").read_text()
+    # Positive capability still enables; null/error still fails closed.
+    assert 'el("signup-name").disabled = !enabled' in src
+    assert "signupBtn.disabled = !enabled" in src
+    assert ".catch(" in src and "applyCapabilities(null)" in src
