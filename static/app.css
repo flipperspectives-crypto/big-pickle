@@ -1246,3 +1246,68 @@ section { scroll-margin-top: 96px; }
 @media (max-width: 520px) {
   .gen-grid { grid-template-columns: 1fr; }
 }
+
+/* System Diagnostics (read-only, zero-inference) */
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 8px;
+}
+.diag-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+}
+.diag-card-head {
+  font: 600 13px var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text2);
+  margin-bottom: 14px;
+}
+.diag-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+.diag-row:first-of-type { border-top: none; }
+.diag-k {
+  font-size: 13px;
+  color: var(--text2);
+}
+.diag-v {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  text-align: right;
+}
+.diag-v code {
+  font: 500 12.5px var(--mono);
+  color: var(--orange-bright, #ff7a18);
+  word-break: break-all;
+}
+.diag-note {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.diag-actions {
+  margin-top: 22px;
+}
+.diag-warning {
+  margin-top: 16px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+@media (max-width: 860px) {
+  .diag-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .diag-grid { grid-template-columns: 1fr; }
+}

@@ -6,7 +6,7 @@ import os
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -28,6 +28,7 @@ from .db import (
 )
 from .status import get_status
 from .router import UpstreamError, available_models, run_completion
+from .build import get_build_info, CHECKPOINT_TAG, CHECKPOINT_COMMIT
 
 app = FastAPI(title="Clarity", version="0.1.0")
 
@@ -72,7 +73,25 @@ if os.path.isdir(_STATIC):
 @app.get("/")
 async def index():
     index = os.path.join(_STATIC, "index.html")
-    return FileResponse(index) if os.path.exists(index) else {"name": "Clarity Gateway", "docs": "/docs"}
+    if not os.path.exists(index):
+        return {"name": "Clarity Gateway", "docs": "/docs"}
+    with open(index, "r", encoding="utf-8") as f:
+        html = f.read()
+    # Automatic cache-busting: version the static assets by their content
+    # fingerprint so a stale app.js/app.css is never served after an update.
+    version = get_build_info()["asset_version"]
+    html = html.replace('/static/app.css', f"/static/app.css?v={version}")
+    html = html.replace('/static/app.js', f"/static/app.js?v={version}")
+    # The HTML shell changes with every asset edit; never let a browser or proxy
+    # cache it. Versioned static assets are cached by their URL instead.
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 class KeyRequest(BaseModel):
@@ -270,6 +289,53 @@ async def admin_usage(x_admin_key: str | None = Header(None)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/v1/build")
+async def build(response: Response = None):
+    """Public, read-only build identity (no secrets, hosts, or git error text)."""
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return get_build_info()
+
+
+@app.get("/v1/diagnostics")
+async def diagnostics(response: Response = None):
+    """Read-only, ZERO-INFERENCE diagnostics surface.
+
+    Aggregates only existing evidence-backed, public surfaces: local model
+    discovery (``/v1/models`` backing cache) and the local runtime (``/api/ps``)
+    plus last-request telemetry. Never runs inference, never claims internet/LAN
+    reachability, GPU/CPU utilization, temperatures, or production readiness, and
+    never exposes prompts, responses, API keys, OLLAMA_BASE_URL, hosts, IPs,
+    filesystem paths, raw Ollama payloads/errors, env vars, credentials, or
+    internal URLs.
+    """
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    build = get_build_info()
+    local_state = await local.local_models_with_status()
+    rt = await runtime.get_runtime()
+    models = rt.get("models") or []
+    last = rt.get("last_local_request")
+    return {
+        "status": "ok",
+        "build": {
+            "current_commit": build["current_commit"],
+            "checkpoint_tag": CHECKPOINT_TAG,
+            "checkpoint_commit": CHECKPOINT_COMMIT,
+        },
+        "gateway": {"process_healthy": True},
+        "local": {
+            "discovery_status": local_state["status"],
+            "models_discovered": len(local_state["models"]),
+            "runtime_status": rt["status"],
+            "models_loaded": len(models),
+            "last_local_request_measured": bool(last),
+        },
+    }
 
 
 @app.get("/v1/local/runtime")

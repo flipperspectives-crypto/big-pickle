@@ -482,6 +482,58 @@ curl <span class="hl" id="curl-base-url">…</span> \
     </div>
   </section>
 
+  <!-- SYSTEM DIAGNOSTICS -->
+  <section class="section" id="diagnostics" aria-labelledby="diag-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">Diagnostics</div>
+        <h2 id="diag-title">System diagnostics</h2>
+        <p>Read-only, zero-inference. Aggregated from local discovery and the local runtime — nothing here is hard-coded.</p>
+      </div>
+
+      <div class="diag-grid">
+        <div class="diag-card">
+          <div class="diag-card-head">Current build</div>
+          <div class="diag-row"><span class="diag-k">Commit</span><span class="diag-v"><code id="diag-build-commit">—</code> <button class="btn btn-sm btn-ghost" type="button" id="diag-build-copy" aria-label="Copy full commit">Copy</button></span></div>
+          <div class="diag-note" id="diag-build-state"></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-card-head">Frozen checkpoint</div>
+          <div class="diag-row"><span class="diag-k">Tag</span><span class="diag-v"><code id="diag-checkpoint-tag">—</code></span></div>
+          <div class="diag-row"><span class="diag-k">SHA</span><span class="diag-v"><code id="diag-checkpoint-sha">—</code></span></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-card-head">Clarity process</div>
+          <div class="diag-row"><span class="diag-k">Status</span><span class="diag-v" id="diag-gateway">—</span></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-card-head">Local discovery</div>
+          <div class="diag-row"><span class="diag-k">Status</span><span class="diag-v" id="diag-discovery">—</span></div>
+          <div class="diag-row"><span class="diag-k">Models discovered</span><span class="diag-v" id="diag-discovery-count">—</span></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-card-head">Local runtime</div>
+          <div class="diag-row"><span class="diag-k">Status</span><span class="diag-v" id="diag-runtime">—</span></div>
+          <div class="diag-row"><span class="diag-k">Models loaded</span><span class="diag-v" id="diag-runtime-count">—</span></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-card-head">Last local request</div>
+          <div class="diag-row"><span class="diag-k">Measured</span><span class="diag-v" id="diag-last-request">—</span></div>
+        </div>
+      </div>
+
+      <div class="diag-actions">
+        <button class="btn btn-sm btn-ghost" type="button" id="diag-refresh" aria-label="Refresh diagnostics">Refresh Diagnostics</button>
+      </div>
+      <p class="diag-warning">Frozen checkpoint is the recovery baseline; the current build may contain newer validated changes. This panel never runs inference and does not claim production readiness.</p>
+    </div>
+  </section>
+
 </main>
 
 <footer class="footer">

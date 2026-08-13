@@ -137,6 +137,8 @@
     },
     validateControl: validateControl,
     isLocalModel: isLocalModel,
+    refreshDiagnostics: refreshDiagnostics,
+    renderDiagnostics: renderDiagnostics,
     getSelectedModel: function () { return selectedModel; },
     setLocalModels: function (list, status) {
       MODELS = (list || []).map(function (m) {
@@ -1128,8 +1130,74 @@
   if (statusRetry) statusRetry.addEventListener("click", loadStatus);
 
   /* =========================================================================
-     Routing animation
-     ========================================================================= */
+      System Diagnostics (read-only, zero-inference)
+      ========================================================================= */
+  var DIAG_BUILD_COMMIT = "";
+
+  function capStatus(s) {
+    if (s === "ok") return "Available";
+    if (s === "unavailable") return "Unavailable";
+    return s || "—";
+  }
+
+  function setText(id, v) {
+    var n = el(id);
+    if (n) n.textContent = v;
+  }
+
+  function renderDiagnostics(data) {
+    if (!data) {
+      setText("diag-build-commit", "—");
+      setText("diag-checkpoint-tag", "—");
+      setText("diag-checkpoint-sha", "—");
+      setText("diag-gateway", "—");
+      setText("diag-discovery", "—");
+      setText("diag-discovery-count", "—");
+      setText("diag-runtime", "—");
+      setText("diag-runtime-count", "—");
+      setText("diag-last-request", "—");
+      setText("diag-build-state", "Diagnostics unavailable.");
+      return;
+    }
+    var build = data.build || {};
+    var local = data.local || {};
+    var cur = typeof build.current_commit === "string" ? build.current_commit : "unknown";
+    DIAG_BUILD_COMMIT = cur;
+    setText("diag-build-commit", cur === "unknown" ? "unknown" : cur.slice(0, 12));
+    setText("diag-build-state", cur === "unknown" ? "Commit unknown in this build." : "Full commit available via Copy.");
+    setText("diag-checkpoint-tag", build.checkpoint_tag || "—");
+    setText("diag-checkpoint-sha", (build.checkpoint_commit || "").slice(0, 12) || "—");
+    setText("diag-gateway", (data.gateway && data.gateway.process_healthy) ? "Healthy" : "Unavailable");
+    setText("diag-discovery", capStatus(local.discovery_status));
+    setText("diag-discovery-count", String(local.models_discovered != null ? local.models_discovered : "—"));
+    setText("diag-runtime", capStatus(local.runtime_status));
+    setText("diag-runtime-count", String(local.models_loaded != null ? local.models_loaded : "—"));
+    setText("diag-last-request", local.last_local_request_measured ? "Measured this process" : "Not measured yet");
+  }
+
+  async function refreshDiagnostics() {
+    try {
+      var r = await fetch(API_BASE.replace("/v1", "") + "/v1/diagnostics");
+      var data = r.ok ? await r.json().catch(function () { return null; }) : null;
+      renderDiagnostics(data);
+    } catch (e) {
+      // Zero-inference, read-only: never throw on a failed probe; show honest dash.
+      renderDiagnostics(null);
+    }
+  }
+
+  (function wireDiagnostics() {
+    var refresh = el("diag-refresh");
+    if (refresh) refresh.addEventListener("click", refreshDiagnostics);
+    var copy = el("diag-build-copy");
+    if (copy) copy.addEventListener("click", function () {
+      if (DIAG_BUILD_COMMIT && DIAG_BUILD_COMMIT !== "unknown") copyText(DIAG_BUILD_COMMIT, this);
+    });
+  })();
+
+  /* =========================================================================
+      Routing animation
+      ========================================================================= */
   if (!REDUCED_MOTION) {
     el("routing").classList.add("routing-anim");
   }
@@ -1141,4 +1209,5 @@
   loadModels();
   loadStatus();
   refreshLocalRuntime();
+  refreshDiagnostics();
 })();

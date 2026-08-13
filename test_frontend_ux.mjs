@@ -110,6 +110,22 @@ function fetchStub(u, init) {
       if (s.includes("/health")) return { status: "ok" };
       if (s.includes("/models")) return { data: MODEL_FIXTURE };
       if (s.includes("/status")) return { status: "ok", providers: {}, gateway: { active_keys: 0, total_balance_usd: 0 }, timestamp: "2026-01-01T00:00:00Z" };
+      if (s.includes("/diagnostics")) return {
+        status: "ok",
+        build: {
+          current_commit: "0123456789abcdef0123456789abcdef01234567",
+          checkpoint_tag: "clarity-local-v1.0.0",
+          checkpoint_commit: "f7dd11c4b5b31f44dc0d4f938be8528b8aef8fa0",
+        },
+        gateway: { process_healthy: true },
+        local: {
+          discovery_status: "ok",
+          models_discovered: 7,
+          runtime_status: "ok",
+          models_loaded: 1,
+          last_local_request_measured: true,
+        },
+      };
       return {};
     },
   });
@@ -502,6 +518,49 @@ check("non-Qwen local gets control", ux.buildChatBody("local/llama-3-8b", "hi").
 
 ux.resetControls();
 ux.setThinking(false);
+
+/* ---- System Diagnostics (read-only, zero-inference) ---- */
+const DIAG_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const htmlDiag = fs.readFileSync(path.join(__dirname, "static", "index.html"), "utf8");
+check("System Diagnostics section rendered in markup", htmlDiag.includes('id="diagnostics"') && htmlDiag.includes("System diagnostics"));
+check("diagnostics shows frozen checkpoint separately", htmlDiag.includes('id="diag-checkpoint-tag"') && htmlDiag.includes('id="diag-checkpoint-sha"'));
+check("diagnostics disclaimer: recovery baseline wording", htmlDiag.includes("recovery baseline") && htmlDiag.includes("does not claim production readiness"));
+check("diagnostics does NOT claim production-ready", !htmlDiag.includes("production-ready") && !htmlDiag.includes("is v1.0.0"));
+
+// refreshDiagnostics() is called at boot; the DOM should be populated now.
+check("current build commit renders (short)", document.getElementById("diag-build-commit").textContent === DIAG_COMMIT.slice(0, 12));
+check("frozen checkpoint tag renders", document.getElementById("diag-checkpoint-tag").textContent === "clarity-local-v1.0.0");
+check("frozen checkpoint SHA renders (short)", document.getElementById("diag-checkpoint-sha").textContent === "f7dd11c4b5b3");
+check("discovery count renders", document.getElementById("diag-discovery-count").textContent === "7");
+check("runtime count renders", document.getElementById("diag-runtime-count").textContent === "1");
+check("gateway process healthy renders", document.getElementById("diag-gateway").textContent === "Healthy");
+check("last local request renders measured", document.getElementById("diag-last-request").textContent === "Measured this process");
+
+// copy commit works (copies the full commit)
+let capturedCommit = null;
+sandbox.navigator.clipboard.writeText = async (t) => { capturedCommit = t; };
+document.getElementById("diag-build-copy").dispatch("click");
+check("copy commit copies the full current commit", capturedCommit === DIAG_COMMIT);
+
+// unavailable states render honestly
+ux.renderDiagnostics({
+  status: "ok",
+  build: { current_commit: DIAG_COMMIT, checkpoint_tag: "clarity-local-v1.0.0", checkpoint_commit: "f7dd11c4b5b31f44dc0d4f938be8528b8aef8fa0" },
+  gateway: { process_healthy: false },
+  local: { discovery_status: "unavailable", models_discovered: 0, runtime_status: "unavailable", models_loaded: 0, last_local_request_measured: false },
+});
+check("unavailable discovery renders Unavailable", document.getElementById("diag-discovery").textContent === "Unavailable");
+check("unavailable runtime renders Unavailable", document.getElementById("diag-runtime").textContent === "Unavailable");
+check("unavailable gateway renders Unavailable", document.getElementById("diag-gateway").textContent === "Unavailable");
+check("unavailable last request renders Not measured yet", document.getElementById("diag-last-request").textContent === "Not measured yet");
+check("unavailable discovery count renders 0", document.getElementById("diag-discovery-count").textContent === "0");
+
+// Refresh Diagnostics calls only the diagnostics endpoint (zero inference)
+fetchCalls.length = 0;
+await ux.refreshDiagnostics();
+check("refresh hits /v1/diagnostics only", fetchCalls.some((c) => c.url.includes("/diagnostics")));
+check("refresh never hits chat completions", !fetchCalls.some((c) => c.url.includes("/chat/completions")));
+check("refresh never hits models/status", !fetchCalls.some((c) => c.url.includes("/v1/models") || c.url.includes("/v1/status")));
 
 console.log(failures === 0 ? "\nALL FRONTEND UX CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
