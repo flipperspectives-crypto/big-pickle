@@ -117,6 +117,28 @@ def _customer_key(authorization: str | None, x_api_key: str | None) -> dict:
     return key
 
 
+def _admin_key_configured() -> bool:
+    # Fail closed. An empty key, or the legacy insecure literal
+    # "admin-change-me", must NEVER grant admin access -- even if supplied via
+    # the environment variable.
+    key = settings.ADMIN_KEY
+    return bool(key) and key != "admin-change-me"
+
+
+def require_admin(x_admin_key: str | None) -> None:
+    """Centralized, fail-closed admin authentication for every admin endpoint.
+
+    - No usable admin key configured -> 503 (admin API intentionally disabled).
+    - Configured key + exact match     -> access granted (constant-time compare).
+    - Configured key + missing/wrong   -> 401.
+    Never logs, prints, or returns the configured secret.
+    """
+    if not _admin_key_configured():
+        raise HTTPException(503, "admin API unavailable: GATEWAY_ADMIN_KEY not configured")
+    if not hmac.compare_digest(x_admin_key or "", settings.ADMIN_KEY):
+        raise HTTPException(401, "invalid admin key")
+
+
 @app.get("/v1/models")
 async def models(
     request: Request,
@@ -227,8 +249,7 @@ async def create_customer_key(
     req: KeyRequest,
     x_admin_key: str | None = Header(None),
 ):
-    if not hmac.compare_digest(x_admin_key or "", settings.ADMIN_KEY):
-        raise HTTPException(401, "admin key required")
+    require_admin(x_admin_key)
     if not req.name.strip():
         raise HTTPException(400, "name required")
     return create_key(req.name.strip())
@@ -268,8 +289,7 @@ async def add_credits_endpoint(
     req: CreditRequest,
     x_admin_key: str | None = Header(None),
 ):
-    if not hmac.compare_digest(x_admin_key or "", settings.ADMIN_KEY):
-        raise HTTPException(401, "admin key required")
+    require_admin(x_admin_key)
     if req.amount <= 0:
         raise HTTPException(400, "amount must be positive")
     balance = add_credits(req.key_id, req.amount)
@@ -280,8 +300,7 @@ async def add_credits_endpoint(
 
 @app.get("/v1/admin/usage")
 async def admin_usage(x_admin_key: str | None = Header(None)):
-    if x_admin_key != settings.ADMIN_KEY:
-        raise HTTPException(401, "admin key required")
+    require_admin(x_admin_key)
     keys = list_keys()
     return {"keys": keys, "usage": usage_all()}
 

@@ -20,7 +20,11 @@ def _norm_ollama(v: str) -> str:
 
 
 class Settings:
-    ADMIN_KEY: str = _env("GATEWAY_ADMIN_KEY", "admin-change-me")
+    # Admin API is fail-closed: there is NO usable default. If this is empty
+    # (or the legacy insecure literal "admin-change-me") the admin API is
+    # disabled and every admin endpoint rejects access. A strong key must be
+    # supplied via the GATEWAY_ADMIN_KEY environment variable.
+    ADMIN_KEY: str = _env("GATEWAY_ADMIN_KEY", "")
     DB_PATH: str = _env("GATEWAY_DB", "/data/gateway.db")
     STRIPE_API_KEY: str = _env("STRIPE_API_KEY", "")
     STRIPE_PUBLISHABLE_KEY: str = _env("STRIPE_PUBLISHABLE_KEY", "")
