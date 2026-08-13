@@ -11,6 +11,7 @@ import json
 import os
 
 import pytest
+from unittest.mock import MagicMock, patch
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
@@ -272,3 +273,89 @@ def test_secrets_not_in_challenge_response():
         assert "authorization" not in {k.lower() for k in r.headers}
     finally:
         _restore(saved)
+
+
+# --- CDP authentication uses the OFFICIAL SDK (the blocking bug fix) ----------
+
+
+def test_cdp_headers_use_official_generator_with_exact_scopes():
+    """The broken impl returned only base64(signature). The fixed impl delegates
+    to cdp.auth.utils.jwt.generate_jwt, scoped per-endpoint, and passes the token
+    through unchanged into a 'Bearer <token>' Authorization header."""
+    saved = _reload({"X402_NETWORK_MODE": "mainnet", "X402_PAYTO": "0xPAY", "X402_PRICE_USD": "0.001"})
+    os.environ["CDP_API_KEY_ID"] = "organizations/org/apiKeys/key"
+    os.environ["CDP_API_KEY_SECRET"] = '{"privateKey":"FAKE_PRIVATE_KEY_FOR_TEST_ONLY"}'
+    importlib.reload(config_mod)
+    importlib.reload(x402_mod)
+    captured = {}
+
+    def _fake(key_id, secret, host, method, path):
+        tok = f"tok.{method}.{path}"
+        captured[(method, path)] = (key_id, secret, host, tok)
+        return tok
+
+    ep_map = {
+        ("POST", "/platform/v2/x402/verify"): "verify",
+        ("POST", "/platform/v2/x402/settle"): "settle",
+        ("GET", "/platform/v2/x402/supported"): "supported",
+    }
+    try:
+        with patch.object(x402_mod, "_cdp_generate_jwt", MagicMock(side_effect=_fake)):
+            headers = x402_mod._cdp_create_headers()
+        # Contract the client actually consumes: verify/settle/supported only.
+        assert set(headers.keys()) == {"verify", "settle", "supported"}
+        assert "bazaar" not in headers
+        for (method, path), name in ep_map.items():
+            assert (method, path) in captured, f"missing scope {method} {path}"
+            key_id, secret, host, tok = captured[(method, path)]
+            assert key_id == "organizations/org/apiKeys/key"
+            assert host == "api.cdp.coinbase.com"
+            assert secret == "FAKE_PRIVATE_KEY_FOR_TEST_ONLY"
+            # Authorization is exactly "Bearer <returned token>".
+            assert headers[name] == {"Authorization": f"Bearer {tok}"}
+            assert headers[name]["Authorization"].startswith("Bearer ")
+    finally:
+        _restore(saved)
+
+
+def test_cdp_secrets_not_logged(caplog):
+    import logging
+
+    saved = _reload({"X402_NETWORK_MODE": "mainnet", "X402_PAYTO": "0xPAY", "X402_PRICE_USD": "0.001"})
+    os.environ["CDP_API_KEY_ID"] = "organizations/org/apiKeys/secretkeyid"
+    os.environ["CDP_API_KEY_SECRET"] = '{"privateKey":"abcdef"}'
+    importlib.reload(config_mod)
+    importlib.reload(x402_mod)
+
+    def _fake(key_id, secret, host, method, path):
+        return f"jwt-{method}-{path}"
+
+    try:
+        with caplog.at_level(logging.DEBUG):
+            with patch.object(x402_mod, "_cdp_generate_jwt", MagicMock(side_effect=_fake)):
+                x402_mod._cdp_create_headers()
+        blob = caplog.text.lower()
+        assert "secretkeyid" not in blob
+        assert "jwt-post" not in blob and "jwt-get" not in blob
+    finally:
+        _restore(saved)
+
+
+def test_no_custom_jwt_signing_in_source():
+    """Guard against regressions of the broken custom-JWT implementation."""
+    src = open(os.path.join(os.path.dirname(__file__), "app", "x402.py")).read()
+    forbidden = [
+        "_b64(",
+        ".sign(",
+        "base64.urlsafe_b64encode",
+        '"alg":',
+        "alg =",
+        "RS256",
+        "load_pem_private_key",
+        "private_key.sign",
+        "sha256()",
+    ]
+    for pat in forbidden:
+        assert pat not in src, f"custom crypto pattern still present: {pat}"
+    assert "from cdp.auth.utils.jwt import" in src
+    assert "generate_jwt(" in src

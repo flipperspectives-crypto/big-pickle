@@ -56,63 +56,59 @@ def _cdp_auth_available() -> bool:
 
 
 def _cdp_create_headers() -> dict:
-    """Build per-endpoint CDP Authorization headers (short-lived JWT Bearer).
+    """Build CDP Authorization headers for the x402 facilitator via the official SDK.
 
-    Uses the official x402 ``CreateHeadersAuthProvider`` contract: a callable that
-    returns ``{verify, settle, supported, bazaar: {Authorization: "Bearer <jwt>"}}``.
-    The JWT is the documented CDP API-key auth (RS256/EC, 120s expiry). Secrets are
-    read from the environment and never logged, printed, or returned.
+    Returns a dict with ``verify``, ``settle``, ``supported`` header maps, each
+    ``{"Authorization": "Bearer <jwt>"}``. Each JWT is generated per-endpoint by the
+    official CDP SDK generator (``cdp.auth.utils.jwt.generate_jwt``), scoped to the
+    exact facilitator endpoint (method, host, path) and short-lived (120s). No custom
+    JWT/crypto is implemented here; the SDK determines the algorithm, header, claims,
+    and signature. Secrets are read from the environment and never logged, printed, or
+    returned. Mainnet only; fail-closed otherwise (see ``build_x402_middleware``).
     """
-    import base64
-    import time
-
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec, padding
-    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from urllib.parse import urlparse
 
     key_id = os.environ["CDP_API_KEY_ID"]
-    secret_raw = os.environ["CDP_API_KEY_SECRET"]
+    secret = os.environ["CDP_API_KEY_SECRET"]
+    # The CDP SDK expects the raw key (PEM/EC or base64/Ed25519). Tolerate the JSON
+    # key-file form by extracting the privateKey field when present.
     try:
-        secret_json = json.loads(secret_raw)
-        pem = secret_json["privateKey"]
+        parsed = json.loads(secret)
+        if isinstance(parsed, dict) and parsed.get("privateKey"):
+            secret = parsed["privateKey"]
     except Exception:
-        pem = secret_raw  # tolerate a raw PEM secret
-    priv = load_pem_private_key(pem.encode(), password=None)
+        pass
 
-    base = settings.X402_FACILITATOR_URL.rstrip("/")
-    endpoints = {
-        "verify": f"POST {base}/verify",
-        "settle": f"POST {base}/settle",
-        "supported": f"GET {base}/supported",
-        "bazaar": f"POST {base}/bazaar",
-    }
+    url = urlparse(settings.X402_FACILITATOR_URL)
+    host = url.netloc
+    base_path = url.path.rstrip("/")
 
-    def _b64(d: bytes) -> bytes:
-        return base64.urlsafe_b64encode(d).rstrip(b"=")
+    endpoints = [
+        ("verify", "POST", base_path + "/verify"),
+        ("settle", "POST", base_path + "/settle"),
+        ("supported", "GET", base_path + "/supported"),
+    ]
+    headers: dict[str, dict[str, str]] = {}
+    for name, method, path in endpoints:
+        token = _cdp_generate_jwt(key_id, secret, host, method, path)
+        headers[name] = {"Authorization": f"Bearer {token}"}
+    return headers
 
-    def _make_jwt(uri: str) -> str:
-        now = int(time.time())
-        header = {"alg": "RS256", "typ": "JWT"}
-        payload = {
-            "iss": "cdp",
-            "sub": key_id,
-            "iat": now,
-            "nbf": now,
-            "exp": now + 120,
-            "uri": uri,
-        }
-        signing_input = (
-            _b64(json.dumps(header, separators=(",", ":")).encode())
-            + b"."
-            + _b64(json.dumps(payload, separators=(",", ":")).encode())
+
+def _cdp_generate_jwt(key_id: str, secret: str, host: str, method: str, path: str) -> str:
+    """Generate a CDP facilitator JWT via the official CDP SDK (no custom crypto)."""
+    from cdp.auth.utils.jwt import JwtOptions, generate_jwt
+
+    return generate_jwt(
+        JwtOptions(
+            api_key_id=key_id,
+            api_key_secret=secret,
+            request_method=method,
+            request_host=host,
+            request_path=path,
+            expires_in=120,
         )
-        if isinstance(priv, ec.EllipticCurvePrivateKey):
-            sig = priv.sign(signing_input, ec.ECDSA(hashes.SHA256()))
-        else:  # RS256
-            sig = priv.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
-        return (b64 := _b64(sig)).decode()
-
-    return {ep: {"Authorization": f"Bearer {_make_jwt(uri)}"} for ep, uri in endpoints.items()}
+    )
 
 
 def _payer_address(request: Request) -> str:
