@@ -219,9 +219,14 @@ def _public_details(m: dict) -> dict | None:
 async def _enforce_request_size(request: Request) -> bytes:
     """Reject oversized chat bodies (413) and return the raw body bytes.
 
-    Measured on the ACTUAL body bytes (never trusts a spoofed Content-Length),
-    with an early reject for obviously oversized Content-Length headers. The
-    body is never logged. Returns the body so the caller can parse it once.
+    Reads the body INCREMENTALLY via ``request.stream()`` so an attacker cannot
+    force the gateway to buffer an arbitrarily large payload when no trusted
+    ``Content-Length`` is present. Reading stops the moment the accumulated size
+    exceeds the limit (never retaining more than ``limit`` bytes), and the exact
+    raw bytes are returned for valid requests so the caller can parse them once.
+    The ``Content-Length`` header is only an EARLY-REJECT optimization, never a
+    trust boundary -- the actual body bytes are always the source of truth.
+    The body is never logged.
     """
     max_bytes = settings.MAX_CHAT_REQUEST_BYTES
     cl = request.headers.get("content-length")
@@ -231,10 +236,27 @@ async def _enforce_request_size(request: Request) -> bytes:
                 raise HTTPException(413, "request payload too large")
         except ValueError:
             pass
-    body = await request.body()
-    if len(body) > max_bytes:
-        raise HTTPException(413, "request payload too large")
-    return body
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(413, "request payload too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _release_on_stream_end(stream, limiter):
+    """Proxy a local-model async stream, releasing the concurrency slot on every
+    exit path: normal completion, exception, cancellation, or client disconnect
+    (which cancels the generator). Guarantees exactly one release per successful
+    acquire; the endpoint deliberately does NOT release streaming slots itself.
+    """
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        limiter.release()
 
 
 @app.post("/v1/chat/completions")
@@ -278,14 +300,19 @@ async def chat_completions(
     # F. Local-inference concurrency (only for local:* models). Fail fast; never
     # block and build an unbounded backlog on the laptop.
     local_slot = False
+    is_stream = False
     if model.startswith("local:"):
         if not await _local_concurrency.acquire():
             raise HTTPException(503, "local model is busy; please retry shortly.")
         local_slot = True
 
-    # G. Execute, releasing the local slot on every exit path.
+    # G. Execute. For non-streaming responses release the slot on every exit
+    # path (success, upstream error, generic error, cancellation). For streaming
+    # responses the slot must stay held until the client has consumed the whole
+    # stream, so it is NOT released here -- _release_on_stream_end does that.
     try:
         data, _cost, _provider = await run_completion(body, key["id"])
+        is_stream = hasattr(data, "__aiter__")
     except UpstreamError as e:
         # Log ONLY sanitized metadata. Never log raw upstream bodies, provider
         # keys, Authorization headers/tokens, internal URLs/hosts, or stack traces.
@@ -299,9 +326,15 @@ async def chat_completions(
         logger.warning("completion_failed exc=%s", type(e).__name__)
         raise HTTPException(502, "Gateway error. Please retry or try another model.")
     finally:
-        if local_slot:
+        if local_slot and not is_stream:
             _local_concurrency.release()
-    if hasattr(data, "__aiter__"):
+
+    if is_stream:
+        if local_slot:
+            return StreamingResponse(
+                _release_on_stream_end(data, _local_concurrency),
+                media_type="text/event-stream",
+            )
         return StreamingResponse(data, media_type="text/event-stream")
     return data
 

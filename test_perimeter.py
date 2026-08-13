@@ -14,6 +14,7 @@ is isolated per run.
 import asyncio
 import os
 import time as _time
+from collections import deque
 
 os.environ.setdefault("GATEWAY_DB", "/tmp/gateway_perimeter_test.db")
 os.environ.setdefault("GATEWAY_ADMIN_KEY", "testadmin")
@@ -520,6 +521,316 @@ def test_F14_rejected_acquire_creates_no_backlog():
         assert await lim.acquire() is False
 
     asyncio.run(go())
+
+
+# --- S. Streaming local concurrency lifetime ---------------------------------
+
+def _make_stream_runner(hold=False, raise_=False):
+    async def fake_run(body, key_id):
+        async def _gen():
+            yield b"data: 1\n\n"
+            if raise_:
+                raise RuntimeError("stream broke")
+            if hold:
+                await asyncio.sleep(0.4)
+            yield b"data: 2\n\n"
+
+        return _gen(), 0.0, "local"
+
+    return fake_run
+
+
+def test_S1_stream_holds_slot_while_open(monkeypatch):
+    # A. A local streaming response keeps the slot held while its iterator is open.
+    async def go():
+        lim = LocalConcurrencyLimit(1)
+        await lim.acquire()
+        event = asyncio.Event()
+
+        async def stream():
+            yield b"data: 1\n\n"
+            await event.wait()  # held open until released
+
+        gen = main_mod._release_on_stream_end(stream(), lim)
+        it = gen.__aiter__()
+        first = await it.__anext__()
+        assert first == b"data: 1\n\n"
+        assert lim.available == 0  # held while the stream is still open
+        event.set()
+        try:
+            await it.__anext__()
+        except StopAsyncIteration:
+            pass
+        assert lim.available == 1  # released after the stream ends
+
+    asyncio.run(go())
+
+
+def test_S2_second_stream_fails_fast_while_active(monkeypatch):
+    # B. A simultaneous second local request fails fast while the first stream
+    #    remains active.
+    async def go():
+        lim = LocalConcurrencyLimit(1)
+        await lim.acquire()
+        event = asyncio.Event()
+
+        async def stream():
+            yield b"data: 1\n\n"
+            await event.wait()
+
+        gen = main_mod._release_on_stream_end(stream(), lim)
+        it = gen.__aiter__()
+        await it.__anext__()
+        assert lim.available == 0
+        # A second acquire while the stream is open must fail fast (no backlog).
+        assert await lim.acquire() is False
+        event.set()
+        try:
+            await it.__anext__()
+        except StopAsyncIteration:
+            pass
+        assert lim.available == 1
+
+    asyncio.run(go())
+
+
+def test_S3_stream_release_on_consume(monkeypatch):
+    # C. Consuming/closing the first stream releases the slot.
+    fake = LocalConcurrencyLimit(1)
+    monkeypatch.setattr(main_mod, "_local_concurrency", fake)
+    monkeypatch.setattr("app.main.run_completion", _make_stream_runner(hold=False))
+    skey, _ = _make_key()
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "local:test", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {skey}"},
+    )
+    _ = r.content
+    assert fake.available == 1
+
+
+def test_S4_stream_exception_releases_slot(monkeypatch):
+    # D. An exception inside the stream releases the slot.
+    async def go():
+        lim = LocalConcurrencyLimit(1)
+        await lim.acquire()
+
+        async def stream():
+            yield b"data: 1\n\n"
+            raise RuntimeError("stream broke")
+
+        gen = main_mod._release_on_stream_end(stream(), lim)
+        it = gen.__aiter__()
+        await it.__anext__()
+        try:
+            await it.__anext__()
+        except RuntimeError:
+            pass
+        assert lim.available == 1  # released despite the stream exception
+
+    asyncio.run(go())
+
+
+def test_S5_nonstream_release_still_works(monkeypatch):
+    # E. A non-stream local response still releases exactly once.
+    fake = LocalConcurrencyLimit(1)
+    monkeypatch.setattr(main_mod, "_local_concurrency", fake)
+    calls = []
+    _stub_run(monkeypatch, calls)
+    skey, _ = _make_key()
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "local:test", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {skey}"},
+    )
+    assert r.status_code == 200, r.text
+    assert fake.available == 1
+
+
+def test_S6_no_double_release_on_stream(monkeypatch):
+    # F. Streaming path performs exactly one release (endpoint defers to wrapper).
+    fake = FakeLocal(busy=False)
+    monkeypatch.setattr(main_mod, "_local_concurrency", fake)
+    monkeypatch.setattr("app.main.run_completion", _make_stream_runner(hold=False))
+    skey, _ = _make_key()
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "local:test", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"Authorization": f"Bearer {skey}"},
+    )
+    _ = r.content
+    assert fake.acquired == 1 and fake.released == 1
+    assert fake.available == 1
+
+
+# --- RL. Rate limiter total state is bounded ---------------------------------
+
+def test_RL1_ceiling_bounds_total_buckets(monkeypatch):
+    # A. Thousands of one-shot unique keys never grow state past the hard ceiling.
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 8)
+    rl = ChatRateLimiter(100000, 60)
+    for i in range(500):
+        rl.check(f"one-shot-{i}")
+    assert len(rl._buckets) <= 8
+
+
+def test_RL2_stale_bucket_evicted(monkeypatch):
+    # B. A fully-expired bucket is removable after the window passes.
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 4)
+    rl = ChatRateLimiter(10, 0.1)
+    rl.check("old-key")  # window 0.1s
+    _time.sleep(0.2)  # old-key now fully expired
+    for i in range(10):
+        rl.check(f"fresh-{i}")
+    assert "old-key" not in rl._buckets
+
+
+def test_RL3_active_limit_works(monkeypatch):
+    # C. Active per-key limits still enforce.
+    rl = ChatRateLimiter(3, 60)
+    assert rl.check("k")[0] is True
+    assert rl.check("k")[0] is True
+    assert rl.check("k")[0] is True
+    assert rl.check("k")[0] is False
+    assert rl.check("k")[1] >= 1
+
+
+def test_RL4_independent_keys(monkeypatch):
+    # D. Separate keys remain independent.
+    rl = ChatRateLimiter(2, 60)
+    assert rl.check("a")[0] is True
+    assert rl.check("a")[0] is True
+    assert rl.check("a")[0] is False
+    assert rl.check("b")[0] is True
+
+
+def test_RL5_no_skey_stored(monkeypatch):
+    # E. Only the authenticated key id is stored; never the skey secret.
+    rl = ChatRateLimiter(10, 60)
+    skey, kid = _make_key("rl-skey")
+    rl.check(kid)
+    assert kid in rl._buckets
+    assert skey not in rl._buckets
+    assert all(k != skey for k in rl._buckets)
+    for dq in rl._buckets.values():
+        for ts in dq:
+            assert not isinstance(ts, str)  # only monotonic timestamps, no secret
+
+
+def test_RL6_partial_bucket_not_fully_stale(monkeypatch):
+    # A. A bucket holding an expired oldest AND a recent newest timestamp is NOT
+    #    fully stale (classification must use dq[-1], not dq[0]).
+    rl = ChatRateLimiter(10, 60)
+    now = _time.monotonic()
+    rl._buckets["mix"] = deque([now - 100.0, now - 1.0])  # expired, recent
+    fully_stale = [k for k, dq in rl._buckets.items() if not dq or dq[-1] <= now - 60]
+    assert "mix" not in fully_stale
+
+
+def test_RL7_active_not_preferentially_evicted(monkeypatch):
+    # B. Under churn, an active (partially-stale) bucket is never chosen as the
+    #    stale eviction victim while a fully-stale bucket exists.
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 2)
+    rl = ChatRateLimiter(10, 60)
+    now = _time.monotonic()
+    rl._buckets["stale"] = deque([now - 200.0])  # dq[-1] expired -> fully stale
+    rl._buckets["active"] = deque([now - 100.0, now - 1.0])  # one active
+    rl.check("fresh")  # forces one eviction past the ceiling of 2
+    assert "active" in rl._buckets
+    assert "stale" not in rl._buckets
+
+
+def test_RL8_newest_expired_is_evictable(monkeypatch):
+    # C. A bucket whose NEWEST timestamp is expired IS evictable.
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 2)
+    rl = ChatRateLimiter(10, 0.1)
+    now = _time.monotonic()
+    rl._buckets["old"] = deque([now - 1.0, now - 0.5])  # dq[-1] expired
+    rl._buckets["cur"] = deque([now])
+    rl.check("fresh2")
+    assert "old" not in rl._buckets
+    assert "cur" in rl._buckets
+
+
+def test_RL9_lra_uses_newest_activity(monkeypatch):
+    # D. Among fully-stale buckets, least-recently-active is by NEWEST timestamp.
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 2)
+    rl = ChatRateLimiter(10, 60)
+    now = _time.monotonic()
+    rl._buckets["a"] = deque([now - 300.0, now - 290.0])  # newest = now-290
+    rl._buckets["b"] = deque([now - 1000.0, now - 100.0])  # newest = now-100 (more recent)
+    rl.check("fresh3")
+    # 'a' has the oldest newest-activity -> evicted; using dq[0] would wrongly pick 'b'.
+    assert "a" not in rl._buckets
+    assert "b" in rl._buckets
+
+
+def test_RL10_churn_under_ceiling(monkeypatch):
+    # E. High key churn never exceeds the 4096 hard ceiling.
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 4096)
+    rl = ChatRateLimiter(100000, 60)
+    for i in range(20000):
+        rl.check(f"k-{i}")
+    assert len(rl._buckets) <= 4096
+
+
+def test_RL11_active_count_not_reset(monkeypatch):
+    # F. An active customer's count is NOT reset when only the oldest timestamp
+    #    expires; in-window entries are preserved (partial-stale bucket untouched).
+    rl = ChatRateLimiter(3, 60)
+    now = _time.monotonic()
+    rl._buckets["cust"] = deque([now - 100.0, now - 5.0, now - 2.0])
+    allowed, _ = rl.check("cust")  # prunes oldest-expired; keeps 2; appends -> 3
+    assert allowed is True
+    assert len(rl._buckets["cust"]) == 3
+    allowed2, _ = rl.check("cust")
+    assert allowed2 is False  # 4th in-window denied; not silently reset to 1
+
+
+def test_RL12_independent_quotas_intact(monkeypatch):
+    # G. Independent key quotas remain intact.
+    rl = ChatRateLimiter(2, 60)
+    for _ in range(2):
+        assert rl.check("a")[0] is True
+    assert rl.check("a")[0] is False
+    assert rl.check("b")[0] is True
+    assert rl.check("b")[0] is True
+    assert rl.check("b")[0] is False
+    assert rl.check("a")[0] is False  # 'a' stays limited; independent from 'b'
+
+
+def test_RL13_empty_bucket_eviction_safe(monkeypatch):
+    # Edge: an empty bucket is fully-stale and eligible for eviction; selection
+    # must use the safe _last_ts helper (no IndexError on empty deque).
+    monkeypatch.setattr("app.guard._MAX_BUCKETS", 2)
+    rl = ChatRateLimiter(10, 60)
+    now = _time.monotonic()
+    rl._buckets["empty"] = deque()  # empty -> fully stale
+    rl._buckets["other"] = deque([now])
+    rl.check("fresh")  # forces one eviction past the ceiling of 2
+    assert "empty" not in rl._buckets  # empty bucket was the eviction victim
+    assert "other" in rl._buckets
+    assert len(rl._buckets) <= 2  # count stays bounded
+
+
+
+# --- A (incremental body handling) ------------------------------------------
+
+def test_A5_incremental_stop_on_oversized_stream(monkeypatch):
+    # An oversized body (no spoofed CL trust) is stopped incrementally at the
+    # limit; the full body is never buffered into inference.
+    monkeypatch.setattr(config.settings, "MAX_CHAT_REQUEST_BYTES", 100)
+    calls = []
+    _stub_run(monkeypatch, calls)
+    skey, _ = _make_key()
+    big = "x" * (1024 * 1024)  # 1 MiB, far above the 100-byte limit
+    r = client.post(
+        "/v1/chat/completions",
+        content=big.encode(),
+        headers={"Authorization": f"Bearer {skey}"},
+    )
+    assert r.status_code == 413, r.text
+    assert not calls, "oversized stream must not trigger inference"
 
 
 # --- Regression: other surfaces unchanged -----------------------------------

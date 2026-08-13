@@ -31,19 +31,15 @@ class ChatRateLimiter:
       records state, so an attacker cannot be rate-limited by probing with bad
       keys (and cannot exhaust another caller's budget).
     - Uses monotonic time; never wall-clock.
-    - State is bounded and pruned per request (a ``deque`` per key).
+    - State is bounded: expired timestamps are pruned per request, and at a hard
+      ceiling of ``_MAX_BUCKETS`` (4096) a single stale/old bucket is evicted so
+      total retained buckets can never grow indefinitely. Quotas are never merged.
     """
 
     def __init__(self, limit: int, window_seconds: float):
         self.limit = max(1, int(limit))
         self.window = max(0.1, float(window_seconds))
         self._buckets: dict[str, deque[float]] = {}
-
-    def _prune_empty(self) -> None:
-        # Best-effort bound on the total number of distinct key buckets.
-        if len(self._buckets) > _MAX_BUCKETS:
-            for k in [k for k, d in self._buckets.items() if not d]:
-                self._buckets.pop(k, None)
 
     def check(self, key_id: str) -> tuple[bool, int]:
         """Record one request for ``key_id`` and return ``(allowed, retry_after)``.
@@ -63,8 +59,40 @@ class ChatRateLimiter:
             retry_after = int(dq[0] + self.window - now) + 1
             return False, max(1, retry_after)
         dq.append(now)
-        self._prune_empty()
+        # Enforce the hard ceiling on total retained key buckets so memory can
+        # never grow unbounded across many one-shot keys.
+        if len(self._buckets) > _MAX_BUCKETS:
+            self._evict_one_stale(now)
         return True, 0
+
+    def _evict_one_stale(self, now: float) -> None:
+        """Evict a single bucket when over the hard ceiling.
+
+        A bucket is fully stale/expired ONLY when it is empty or its most-recent
+        request timestamp is outside the window (``dq[-1] <= now - self.window``).
+        A bucket that still holds an in-window timestamp is NEVER treated as
+        stale, so an active customer's quota is never reset under key churn.
+
+        Among fully-stale buckets, prefer the one whose most-recent activity is
+        oldest. If none are fully stale, evict the globally least-recently-active
+        bucket using ``dq[-1]`` (never merge quotas; only key ids are retained).
+        """
+        if not self._buckets:
+            return
+
+        def _last_ts(k):
+            dq = self._buckets[k]
+            return dq[-1] if dq else now
+
+        fully_stale = [
+            k for k, dq in self._buckets.items()
+            if not dq or dq[-1] <= now - self.window
+        ]
+        if fully_stale:
+            victim = min(fully_stale, key=_last_ts)
+        else:
+            victim = min(self._buckets, key=_last_ts)
+        self._buckets.pop(victim, None)
 
     def reset(self) -> None:
         """Drop all recorded state (test isolation)."""
