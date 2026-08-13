@@ -231,5 +231,132 @@ def test_powershell_availability_printed():
     print("PowerShell execution available in this environment:", bool(pwsh))
 
 
+# --------------------------------------------------------------------------
+# C2.1 regression coverage
+# --------------------------------------------------------------------------
+
+def test_stop_does_not_clobber_automatic_pid(scripts):
+    t = scripts["Stop-Clarity.ps1"]
+    # must not assign to the automatic $PID / $pid variable
+    assert not re.search(r"(?i)\$pid\s*=", t), "Stop-Clarity.ps1 assigns to $pid"
+    # safe local name is used instead
+    assert "$clarityPid" in t
+    # Get-ClarityPid still returns the value
+    assert "function Get-ClarityPid" in t
+
+
+def test_start_gates_perform_fresh_reads(scripts):
+    t = scripts["Start-Clarity.ps1"]
+    # every readiness gate must call Get-Json inside its scriptblock
+    gates = re.findall(r"Wait-For\s+'[^']+'\s*\{([^}]*)\}", t, re.S)
+    assert len(gates) >= 5, f"expected >=5 readiness gates, found {len(gates)}"
+    for g in gates:
+        assert "Get-Json" in g, f"gate does not perform a fresh GET: {g!r}"
+
+
+def test_start_build_gate_reads_build_each_retry(scripts):
+    t = scripts["Start-Clarity.ps1"]
+    assert re.search(r"Wait-For\s+'build\.current_commit == git HEAD'\s*\{[^}]*Get-Json[^}]*\$expected", t, re.S)
+
+
+def test_start_port_safety(scripts):
+    t = scripts["Start-Clarity.ps1"]
+    assert "Test-PortListening" in t
+    assert re.search(r"LISTENING", t)
+    assert "PORT 7860 OCCUPIED OR BUILD MISMATCH" in t
+    # when reusing, uvicorn must NOT be started again
+    assert re.search(r"if\s*\(-not \$reuse\)\s*\{[\s\S]*Start-Process[\s\S]*uvicorn", t)
+    # safe abort (Write-Error) when identity cannot be proven
+    assert re.search(r"PORT 7860 OCCUPIED OR BUILD MISMATCH[\s\S]*Write-Error", t)
+
+
+def test_start_no_duplicate_against_unknown_listener(scripts):
+    t = scripts["Start-Clarity.ps1"]
+    # the occupied-but-unproven branch must not start uvicorn
+    assert not re.search(r"PORT 7860 OCCUPIED OR BUILD MISMATCH[\s\S]*Start-Process.*uvicorn", t)
+
+
+def test_start_uses_safe_short_sha(scripts):
+    t = scripts["Start-Clarity.ps1"]
+    assert "function ShortSha" in t
+    # final attestation never calls .Substring() directly on runtime commit
+    assert re.search(r"ShortSha\s+\$finalBuild\.current_commit", t)
+
+
+def test_update_uses_correct_ancestor_proof(scripts):
+    t = scripts["Update-Clarity.ps1"]
+    assert "merge-base --is-ancestor" in t
+    assert re.search(r"merge-base --is-ancestor HEAD origin/main", t)
+    assert re.search(r"if\s*\(\$LASTEXITCODE -ne 0\)", t)
+    # the old incorrect equality test must be gone
+    assert "merge-base HEAD origin/main" not in t
+
+
+def test_update_behind_main_accepted_structurally(scripts):
+    t = scripts["Update-Clarity.ps1"]
+    # --is-ancestor by nature allows HEAD behind origin/main; ensure no
+    # equality-to-origin requirement blocks a fast-forward
+    assert "merge-base --is-ancestor" in t
+    assert "--ff-only" in t
+
+
+def test_update_already_current_preserves_rollback_target(scripts):
+    t = scripts["Update-Clarity.ps1"]
+    assert "$alreadyCurrent = ($oldSha -eq $originMain)" in t
+    # Previous-Clarity-Commit.txt is only written when NOT already current
+    assert re.search(
+        r"if\s*\(-not \$alreadyCurrent\)\s*\{[\s\S]*?Previous-Clarity-Commit\.txt", t
+    )
+    assert "CLARITY IS UP TO DATE" in t
+
+
+def test_update_null_runtime_evidence_safe(scripts):
+    t = scripts["Update-Clarity.ps1"]
+    # guard before dereferencing runtime_commit
+    assert re.search(r"if\s*\(\$startEv -and \$startEv\.runtime_commit\)", t)
+    # failure path uses a safe 'unknown' value
+    assert re.search(r"rtShown.*'unknown'", t) or "'unknown'" in t
+    # no bare "$startEv.runtime_commit.Substring" on a possibly-null object
+    assert "if ($startEv -and $startEv.runtime_commit)" in t
+
+
+def test_rollback_null_failure_path_safe(scripts):
+    t = scripts["Rollback-Clarity.ps1"]
+    # null guard before dereferencing runtime_commit
+    assert re.search(r"\$null -ne \$startEv", t)
+    # evidence is written even when Start failed
+    assert "Last-Rollback.json" in t
+    assert re.search(r"runtime_commit\s*=\s*if\s*\(\$startEv\)", t)
+
+
+def test_recovery_readme_inside_staging(scripts):
+    t = scripts["Create-Clarity-Recovery-Bundle.ps1"]
+    # README is written into $Staging (so it lands in the ZIP)
+    assert re.search(r"Join-Path \$Staging 'RECOVERY_README\.txt'", t)
+
+
+def test_recovery_manifest_inside_staging(scripts):
+    t = scripts["Create-Clarity-Recovery-Bundle.ps1"]
+    # manifest is written into $Staging (so it lands in the ZIP)
+    assert re.search(r"Join-Path \$Staging 'SHA256MANIFEST\.txt'", t)
+    # manifest excludes itself
+    assert re.search(r"Where-Object \{\s*\$_\.Name -ne 'SHA256MANIFEST\.txt'", t)
+
+
+def test_recovery_bundle_checks_last_exit_code(scripts):
+    t = scripts["Create-Clarity-Recovery-Bundle.ps1"]
+    assert re.search(r"bundle create", t)
+    assert re.search(r"\$LASTEXITCODE -eq 0", t)
+    assert re.search(r"\$bundleOk = \$true", t)
+
+
+def test_recovery_zip_includes_readme_and_manifest(scripts):
+    t = scripts["Create-Clarity-Recovery-Bundle.ps1"]
+    # both README and manifest are staged before Compress-Archive
+    staging_writes = t.split("Compress-Archive")[0]
+    assert "RECOVERY_README.txt" in staging_writes
+    assert "SHA256MANIFEST.txt" in staging_writes
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

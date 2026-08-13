@@ -14,6 +14,12 @@ $LauncherDir  = Join-Path $HOME 'Clarity-Launcher'
 
 function Get-Sha($ref) { return (git -C $RepoDir rev-parse $ref).Trim() }
 
+function ShortSha($s) {
+    if ($s -is [string] -and $s -match '^[0-9a-f]{40}$') { return $s.Substring(0, 12) }
+    if ($s -is [string] -and $s -match '^[0-9a-f]{7,}$') { return $s.Substring(0, [Math]::Min(12, $s.Length)) }
+    return 'unknown'
+}
+
 function Assert-CleanTree {
     $status = (git -C $RepoDir status --porcelain)
     if ($status.Trim().Length -ne 0) {
@@ -34,7 +40,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Rollback target commit does not exist: $target"
 }
 
-$confirm = Read-Host ("Roll back to " + $target.Substring(0, 12) + "? Type YES to continue")
+$confirm = Read-Host ("Roll back to " + (ShortSha $target) + "? Type YES to continue")
 if ($confirm -ne 'YES') { Write-Host "Rollback cancelled."; exit 0 }
 
 Assert-CleanTree
@@ -49,16 +55,21 @@ Set-Content -Path (Join-Path $LauncherDir 'Redo-Clarity-Commit.txt') -Value $fro
 # Detached HEAD at the rollback target. origin/main is NOT touched.
 git -C $RepoDir checkout --detach $target
 
-# Run Start attestation; a mismatch must NOT be reported as success.
+# Run Start attestation; a mismatch must NOT be reported as success. Any failure
+# path must leave $startEv as $null rather than throwing a second exception.
+$startEv = $null
 try {
     & (Join-Path $LauncherDir 'Start-Clarity.ps1')
-    $startEv = Get-Content (Join-Path $LauncherDir 'Last-Start.json') -Raw | ConvertFrom-Json
+    if (Test-Path (Join-Path $LauncherDir 'Last-Start.json')) {
+        $startEv = Get-Content (Join-Path $LauncherDir 'Last-Start.json') -Raw | ConvertFrom-Json
+    }
 } catch {
     $startEv = $null
 }
 
 $runtimeVerified = ($null -ne $startEv -and $startEv.runtime_commit -eq $target)
 
+# Failure evidence is written safely even when Start failed (runtime_commit may be $null).
 $ev = [ordered]@{
     timestamp_utc     = (Get-Date).ToUniversalTime().ToString('o')
     from_commit       = $fromSha
