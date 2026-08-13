@@ -13,7 +13,7 @@ https://desktop-o99r0sf.tail935fba.ts.net
 
 ## Pilot model
 
-- `local:qwen3:1.7b` — the only model enabled for the pilot (runs on the
+- `local:qwen3:1.7b` — the designated model for this pilot (runs on the
   gateway's single local Ollama slot at $0 token cost).
 
 ## Payment network
@@ -49,33 +49,41 @@ https://desktop-o99r0sf.tail935fba.ts.net
   retry later, not queue an unbounded backlog.
 - Respect `413` — **request body too large**; shrink the request and retry.
 
-## Python usage example
+## CLI usage
 
-Uses the existing SDK example
-`examples/agent-sdk-example/clarity_agent.py`. Set the public endpoint, then run
-the DRY-RUN (no funds, no secrets). To actually settle, export a funded Base
-Sepolia wallet as `X402_PAYER_KEY` and run LIVE.
+The SDK example lives at `examples/agent-sdk-example/clarity_agent.py`.
 
-```python
-import os
-from examples.agent_sdk_example.clarity_agent import ClarityAgent
+**DRY RUN (no funds, no signature, no secrets):**
 
-# Public TESTNET pilot endpoint (no payment details hard-coded here).
-BASE_URL = "https://desktop-o99r0sf.tail935fba.ts.net"
+```bash
+python examples/agent-sdk-example/clarity_agent.py
+```
 
-# DRY RUN: no funds moved, no signature produced, no secrets used.
-agent = ClarityAgent(base_url=BASE_URL, dry_run=True)
-result = agent.run_sync()  # default pilot model: local:qwen3:1.7b
+On Windows (one line):
 
-# LIVE (spends Base Sepolia TEST USDC): export YOUR wallet client-side only.
-#   export X402_PAYER_KEY="0xYOUR_BASE_SEPOLIA_PRIVATE_KEY"
-#   agent = ClarityAgent(base_url=BASE_URL, dry_run=False)
-#   result = agent.run_sync(model="local:qwen3:1.7b")
+```bat
+python examples/agent-sdk-example/clarity_agent.py
+```
+
+**LIVE (spends Base Sepolia TEST USDC):** export a funded Base Sepolia wallet
+client-side only, then:
+
+```bash
+python examples/agent-sdk-example/clarity_agent.py \
+  --live \
+  --base-url https://desktop-o99r0sf.tail935fba.ts.net \
+  --model local:qwen3:1.7b
+```
+
+On Windows (one line):
+
+```bat
+python examples/agent-sdk-example/clarity_agent.py --live --base-url https://desktop-o99r0sf.tail935fba.ts.net --model local:qwen3:1.7b
 ```
 
 The private key is read from the `X402_PAYER_KEY` environment variable, used only
-to build the signer, then immediately discarded by the SDK example — it is never
-printed, logged, persisted, or sent to Clarity.
+to build the signer, then immediately discarded — it is never printed, logged,
+persisted, or sent to Clarity.
 
 ## What this pilot is NOT
 

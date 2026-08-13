@@ -406,9 +406,41 @@ def _safe_json(r: httpx.Response):
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    if "--live" in sys.argv:
-        live_example()
+    parser = argparse.ArgumentParser(description="Clarity Agent SDK example")
+    parser.add_argument(
+        "--base-url",
+        default="https://example.invalid",
+        help="Gateway base URL (defaults to a safe non-routable placeholder).",
+    )
+    parser.add_argument(
+        "--model",
+        default="local:qwen3:1.7b",
+        help="Inference model to request.",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Settle a real x402 payment (requires X402_PAYER_KEY).",
+    )
+    args = parser.parse_args()
+
+    base_url = args.base_url
+    if args.live:
+        # LIVE must target a real gateway; refuse the safe placeholder default.
+        if base_url == "https://example.invalid":
+            parser.error(
+                "--live requires an explicit --base-url "
+                "(refusing to target the placeholder)."
+            )
+        agent = ClarityAgent(base_url=base_url, dry_run=False)
+        result = agent.run_sync(model=args.model)
     else:
-        demo()
+        # Offline DRY-RUN demo: embedded mock transport; no network, funds, or
+        # secrets. base_url is ignored in this mode.
+        agent = ClarityAgent(
+            base_url=base_url, dry_run=True, transport=_demo_transport()
+        )
+        result = agent.run_sync(model=args.model)
+    print(json.dumps(result, indent=2))
