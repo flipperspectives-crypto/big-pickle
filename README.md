@@ -4,6 +4,8 @@
 
 One API. Every model. Prepaid credits, automatic failover, and free local inference.
 
+> **Agent pilot (Base Sepolia TESTNET):** Clarity is running a controlled external-agent TESTNET pilot — **not mainnet, not production-ready, and no claim of real revenue**. See the [Agent quickstart](docs/AGENT_QUICKSTART.md) for the public endpoint, the pilot model, and the x402 payment flow.
+
 Clarity is an OpenAI-compatible inference gateway. Customers get one API key and prepaid credits; the gateway
 routes each request across multiple providers (Groq, Cerebras, OpenAI, Anthropic, DeepInfra, Together, Fireworks,
 Hugging Face, OpenRouter — plus any local Ollama models at $0) and transparently fails over when a provider is down.

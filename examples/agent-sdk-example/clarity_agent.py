@@ -230,7 +230,7 @@ class ClarityAgent:
     # -- orchestration ------------------------------------------------------
     async def run(
         self,
-        model: str = "clarity/local-demo",
+        model: str = "local:qwen3:1.7b",
         messages: list[dict] | None = None,
         payer_address: str = "0xAGENT_PUBLIC_ADDRESS_DEMO",
     ) -> dict:
