@@ -358,5 +358,56 @@ def test_recovery_zip_includes_readme_and_manifest(scripts):
     assert "SHA256MANIFEST.txt" in staging_writes
 
 
+# --------------------------------------------------------------------------
+# C2.2 clean-tree hotfix regression coverage
+# --------------------------------------------------------------------------
+
+def test_clean_tree_assertion_array_based(scripts):
+    for name in ("Rollback-Clarity.ps1", "Update-Clarity.ps1"):
+        t = scripts[name]
+        # status output is collected into an array (never a bare $null scalar)
+        assert re.search(r"\$statusLines = @\(git -C \$RepoDir status --porcelain\)", t), \
+            f"{name} must collect porcelain output into an array"
+        # git-status failure is rejected
+        assert re.search(r"if \(\$LASTEXITCODE -ne 0\)", t), \
+            f"{name} must check \$LASTEXITCODE"
+        # non-empty porcelain output is rejected (Count, not .Trim())
+        assert re.search(r"if \(\$statusLines\.Count -gt 0\)", t), \
+            f"{name} must reject non-empty porcelain via Count"
+
+
+def test_clean_tree_no_trim_on_status(scripts):
+    for name in ("Rollback-Clarity.ps1", "Update-Clarity.ps1"):
+        t = scripts[name]
+        # the porcelain result must NOT be .Trim()'d (the null-valued crash)
+        assert "status --porcelain).Trim(" not in t, \
+            f"{name} still calls .Trim() on the status result"
+
+
+def test_clean_tree_rejects_dirty(scripts):
+    for name, verb in (("Rollback-Clarity.ps1", "roll back"),
+                       ("Update-Clarity.ps1", "update")):
+        t = scripts[name]
+        assert re.search(r'Write-Error "Working tree is not clean; refusing to ' + re.escape(verb) + r'\."', t), \
+            f"{name} must reject a dirty working tree"
+
+
+def test_clean_tree_git_failure_rejected(scripts):
+    for name in ("Rollback-Clarity.ps1", "Update-Clarity.ps1"):
+        t = scripts[name]
+        assert 'Write-Error "Unable to determine Git working-tree status."' in t, \
+            f"{name} must reject git-status failure"
+
+
+def test_clean_tree_accepts_zero_output(scripts):
+    # Structural guarantee: a clean tree produces an empty array (Count == 0),
+    # so the dirty-tree branch is skipped and no method is called on $null.
+    for name in ("Rollback-Clarity.ps1", "Update-Clarity.ps1"):
+        t = scripts[name]
+        assert re.search(r"\$statusLines = @\(git -C \$RepoDir status --porcelain\)", t)
+        assert re.search(r"if \(\$statusLines\.Count -gt 0\)", t)
+        assert "status --porcelain).Trim(" not in t
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

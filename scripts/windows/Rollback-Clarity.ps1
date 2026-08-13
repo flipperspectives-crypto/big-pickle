@@ -21,8 +21,14 @@ function ShortSha($s) {
 }
 
 function Assert-CleanTree {
-    $status = (git -C $RepoDir status --porcelain)
-    if ($status.Trim().Length -ne 0) {
+    # Windows PowerShell returns $null (not an empty string) for a clean tree,
+    # so never call .Trim() on the raw status. Collect into an array and rely
+    # on Count, which is 0 for a clean tree.
+    $statusLines = @(git -C $RepoDir status --porcelain)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Unable to determine Git working-tree status."
+    }
+    if ($statusLines.Count -gt 0) {
         Write-Error "Working tree is not clean; refusing to roll back."
     }
 }
