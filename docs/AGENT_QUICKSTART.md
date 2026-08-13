@@ -81,6 +81,10 @@ On Windows (one line):
 python examples/agent-sdk-example/clarity_agent.py --live --base-url https://desktop-o99r0sf.tail935fba.ts.net --model local:qwen3:1.7b
 ```
 
+The example uses a **120-second default HTTP timeout** because local
+inference can take longer than typical cloud API requests; pass
+`--timeout-seconds N` to override. This is not a guaranteed response time.
+
 The private key is read from the `X402_PAYER_KEY` environment variable, used only
 to build the signer, then immediately discarded — it is never printed, logged,
 persisted, or sent to Clarity.

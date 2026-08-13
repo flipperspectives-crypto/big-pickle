@@ -175,16 +175,22 @@ class ClarityAgent:
         base_url: str = DEFAULT_BASE_URL,
         dry_run: bool = True,
         transport: httpx.BaseTransport | None = None,
+        timeout_seconds: float = 120.0,
     ):
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be > 0")
         self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
         if transport is not None:
+            # Embedded MockTransport dry-run: offline, no real network timeout.
             self.client = httpx.Client(
                 transport=transport, headers={"Content-Type": "application/json"}
             )
         else:
+            # Real-network client: local inference can legitimately exceed typical
+            # cloud API latency, so the default is 120s, not 30s.
             self.client = httpx.Client(
-                timeout=30, headers={"Content-Type": "application/json"}
+                timeout=timeout_seconds, headers={"Content-Type": "application/json"}
             )
 
     # -- low level HTTP -----------------------------------------------------
@@ -408,6 +414,15 @@ def _safe_json(r: httpx.Response):
 if __name__ == "__main__":
     import argparse
 
+    def _positive_timeout(value: str) -> float:
+        try:
+            f = float(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError("timeout must be a number")
+        if f <= 0:
+            raise argparse.ArgumentTypeError("timeout must be > 0")
+        return f
+
     parser = argparse.ArgumentParser(description="Clarity Agent SDK example")
     parser.add_argument(
         "--base-url",
@@ -418,6 +433,13 @@ if __name__ == "__main__":
         "--model",
         default="local:qwen3:1.7b",
         help="Inference model to request.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=_positive_timeout,
+        default=120.0,
+        help="HTTP timeout for the live gateway client (default 120s; local "
+        "inference can take longer than typical cloud API requests).",
     )
     parser.add_argument(
         "--live",
@@ -434,13 +456,18 @@ if __name__ == "__main__":
                 "--live requires an explicit --base-url "
                 "(refusing to target the placeholder)."
             )
-        agent = ClarityAgent(base_url=base_url, dry_run=False)
+        agent = ClarityAgent(
+            base_url=base_url, dry_run=False, timeout_seconds=args.timeout_seconds
+        )
         result = agent.run_sync(model=args.model)
     else:
         # Offline DRY-RUN demo: embedded mock transport; no network, funds, or
-        # secrets. base_url is ignored in this mode.
+        # secrets. base_url/timeout are ignored in this mode.
         agent = ClarityAgent(
-            base_url=base_url, dry_run=True, transport=_demo_transport()
+            base_url=base_url,
+            dry_run=True,
+            transport=_demo_transport(),
+            timeout_seconds=args.timeout_seconds,
         )
         result = agent.run_sync(model=args.model)
     print(json.dumps(result, indent=2))
