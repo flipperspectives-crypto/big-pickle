@@ -144,12 +144,13 @@
         <form id="signup-form">
           <div class="field">
             <label for="signup-name">Name / app name</label>
-            <input class="input" type="text" id="signup-name" name="name" placeholder="my-app" autocomplete="off" maxlength="80" required>
+            <input class="input" type="text" id="signup-name" name="name" placeholder="my-app" autocomplete="off" maxlength="80" required disabled>
           </div>
-          <button class="btn btn-primary" type="submit" id="signup-btn">
+          <button class="btn btn-primary" type="submit" id="signup-btn" disabled>
             <span class="btn-label">Create API Key</span>
           </button>
           <div class="error-panel" id="signup-error" hidden></div>
+          <div class="error-panel" id="signup-status">Checking signup availability…</div>
         </form>
 
         <div class="key-reveal" id="key-reveal">

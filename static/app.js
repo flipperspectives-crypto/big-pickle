@@ -827,6 +827,36 @@
   });
 
   /* =========================================================================
+     Capabilities: reflect server-side signup availability (fail closed)
+     ========================================================================= */
+  function applyCapabilities(caps) {
+    var enabled = !!(caps && caps.public_signup_enabled);
+    var x402 = !!(caps && caps.x402_enabled);
+    var statusEl = el("signup-status");
+    // Fail closed: if capabilities are missing/unreachable, treat signup as
+    // disabled rather than assuming it is available.
+    el("signup-name").disabled = !enabled;
+    signupBtn.disabled = !enabled;
+    if (enabled) {
+      if (statusEl) { statusEl.hidden = true; statusEl.textContent = ""; }
+      return;
+    }
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.textContent = x402
+        ? "Public self-service signup is disabled. Machine access is available via x402 payments."
+        : "Public self-service signup is disabled.";
+    }
+  }
+
+  (function loadCapabilities() {
+    fetch(API_BASE + "/v1/capabilities", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(applyCapabilities)
+      .catch(function () { applyCapabilities(null); }); // fail closed
+  })();
+
+  /* =========================================================================
      Balance + first-run hint
      ========================================================================= */
   function showFirstRun(show) {

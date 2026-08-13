@@ -273,6 +273,25 @@ async def signup(req: KeyRequest):
     }
 
 
+@app.get("/v1/capabilities")
+async def capabilities(response: Response = None):
+    """Public, read-only, non-secret runtime capability flags for the UI.
+
+    The frontend fetches this on load and treats a missing/unreachable
+    response as signup disabled (fail closed in the UI). This endpoint only
+    reports safe, intentional configuration facts -- never admin config, API
+    keys, wallet details, env values, internal URLs, paths, or credentials.
+    """
+    if response is not None:
+        # Runtime configuration facts: never let a browser/proxy cache them.
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return {
+        "public_signup_enabled": settings.PUBLIC_SIGNUP_ENABLED,
+        "x402_enabled": bool(settings.X402_PAYTO),
+    }
+
+
 @app.get("/v1/usage")
 async def customer_usage(
     authorization: str | None = Header(None),
