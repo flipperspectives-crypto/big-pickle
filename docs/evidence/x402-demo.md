@@ -4,8 +4,14 @@ Machine-payable gateway top-up for **Clarity** using the official
 [`x402`](https://github.com/coinbase/x402) Python SDK (x402 **v2.19.0**).
 
 Network: **Base Sepolia** (`eip155:84532`), asset **USDC**
-`0x036CbD53842c5426634e7929541eC2318f3dCF7e`, settled via the official
+`0x036CbD53842c5426634e7929541eC2318f3dCF7E`, settled via the official
 **x402.org test facilitator** (`https://x402.org/facilitator`).
+
+> This document describes the **default testnet** configuration. Mainnet
+> (`eip155:8453`, native Base USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`,
+> CDP facilitator `https://api.cdp.coinbase.com/platform/v2/x402`) is a separate,
+> fail-closed mode enabled only with `X402_NETWORK_MODE=mainnet` and CDP
+> credentials. It is **not enabled by default** and spends real funds.
 
 ## 1. Install / version
 

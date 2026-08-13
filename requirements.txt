@@ -3,3 +3,6 @@ uvicorn[standard]>=0.30
 httpx>=0.27
 stripe>=9.0
 x402[fastapi,evm]
+# Required for Base mainnet (X402_NETWORK_MODE=mainnet) CDP facilitator JWT auth.
+# Only imported lazily inside the mainnet auth path; not needed for testnet.
+cryptography>=42.0

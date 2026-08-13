@@ -25,11 +25,13 @@ response is discarded (402) and no credit is recorded.
 import hashlib
 import json
 import logging
+import os
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from x402 import x402ResourceServer
 from x402.http import HTTPFacilitatorClient, FacilitatorConfig
+from x402.http.facilitator_client_base import CreateHeadersAuthProvider
 from x402.http.middleware.fastapi import payment_middleware
 from x402.http.types import PaymentOption, RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
@@ -44,7 +46,73 @@ from .db import (
 
 log = logging.getLogger("x402")
 
-_USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+def _cdp_auth_available() -> bool:
+    """True only when both CDP mainnet credentials are present.
+
+    Mainnet must fail closed: no credentials => no mainnet challenge.
+    """
+    return bool(settings.X402_CDP_API_KEY_ID and settings.X402_CDP_API_KEY_SECRET)
+
+
+def _cdp_create_headers() -> dict:
+    """Build per-endpoint CDP Authorization headers (short-lived JWT Bearer).
+
+    Uses the official x402 ``CreateHeadersAuthProvider`` contract: a callable that
+    returns ``{verify, settle, supported, bazaar: {Authorization: "Bearer <jwt>"}}``.
+    The JWT is the documented CDP API-key auth (RS256/EC, 120s expiry). Secrets are
+    read from the environment and never logged, printed, or returned.
+    """
+    import base64
+    import time
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, padding
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    key_id = os.environ["CDP_API_KEY_ID"]
+    secret_raw = os.environ["CDP_API_KEY_SECRET"]
+    try:
+        secret_json = json.loads(secret_raw)
+        pem = secret_json["privateKey"]
+    except Exception:
+        pem = secret_raw  # tolerate a raw PEM secret
+    priv = load_pem_private_key(pem.encode(), password=None)
+
+    base = settings.X402_FACILITATOR_URL.rstrip("/")
+    endpoints = {
+        "verify": f"POST {base}/verify",
+        "settle": f"POST {base}/settle",
+        "supported": f"GET {base}/supported",
+        "bazaar": f"POST {base}/bazaar",
+    }
+
+    def _b64(d: bytes) -> bytes:
+        return base64.urlsafe_b64encode(d).rstrip(b"=")
+
+    def _make_jwt(uri: str) -> str:
+        now = int(time.time())
+        header = {"alg": "RS256", "typ": "JWT"}
+        payload = {
+            "iss": "cdp",
+            "sub": key_id,
+            "iat": now,
+            "nbf": now,
+            "exp": now + 120,
+            "uri": uri,
+        }
+        signing_input = (
+            _b64(json.dumps(header, separators=(",", ":")).encode())
+            + b"."
+            + _b64(json.dumps(payload, separators=(",", ":")).encode())
+        )
+        if isinstance(priv, ec.EllipticCurvePrivateKey):
+            sig = priv.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+        else:  # RS256
+            sig = priv.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        return (b64 := _b64(sig)).decode()
+
+    return {ep: {"Authorization": f"Bearer {_make_jwt(uri)}"} for ep, uri in endpoints.items()}
 
 
 def _payer_address(request: Request) -> str:
@@ -111,7 +179,7 @@ def _after_settle(context) -> None:
         return
 
     network = getattr(requirements, "network", settings.X402_CHAIN_ID)
-    asset = getattr(requirements, "asset", _USDC_BASE_SEPOLIA)
+    asset = getattr(requirements, "asset", settings.X402_ASSET)
     amount_atomic = getattr(requirements, "amount", "0")
     try:
         amount_usd = int(amount_atomic) / 1_000_000
@@ -154,10 +222,22 @@ def build_x402_middleware(
     if not settings.X402_PAYTO:
         log.warning("X402_PAYTO not set; /v1/x402/topup is disabled")
         return None
-    if facilitator_client is None:
-        facilitator_client = HTTPFacilitatorClient(
-            FacilitatorConfig(url=settings.X402_FACILITATOR_URL)
-        )
+    if settings.X402_NETWORK_MODE == "mainnet":
+        # Fail closed: never advertise a mainnet challenge without credentials,
+        # and never silently fall back to testnet / x402.org.
+        if not _cdp_auth_available():
+            log.warning("mainnet facilitator unavailable: credentials/auth not configured")
+            return None
+        auth_provider = CreateHeadersAuthProvider(create_headers=_cdp_create_headers)
+        if facilitator_client is None:
+            facilitator_client = HTTPFacilitatorClient(
+                FacilitatorConfig(url=settings.X402_FACILITATOR_URL, auth_provider=auth_provider)
+            )
+    else:
+        if facilitator_client is None:
+            facilitator_client = HTTPFacilitatorClient(
+                FacilitatorConfig(url=settings.X402_FACILITATOR_URL)
+            )
     if server is None:
         server = x402ResourceServer(facilitator_client)
         server.register(settings.X402_CHAIN_ID, ExactEvmServerScheme())
@@ -181,7 +261,7 @@ async def x402_topup(request: Request):
         "credited_usd": amount,
         "network": settings.X402_CHAIN_ID,
         "scheme": "exact",
-        "asset": _USDC_BASE_SEPOLIA,
+        "asset": settings.X402_ASSET,
         "payer": payer,
         "message": "Key funded after successful settlement; verify balance via /v1/usage.",
     }

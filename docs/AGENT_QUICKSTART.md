@@ -93,3 +93,15 @@ persisted, or sent to Clarity.
 
 This is a testnet pilot. It is not production-ready, not battle-tested, not a
 claim of secure autonomous operation, and generates no real (mainnet) revenue.
+
+## Mainnet mode (not enabled by default)
+
+The gateway ships in `X402_NETWORK_MODE=testnet` (Base Sepolia). Mainnet is
+opt-in and **fail-closed**: the gateway only advertises a mainnet
+`PAYMENT-REQUIRED` challenge when `X402_NETWORK_MODE=mainnet` **and** both
+`CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` are configured. With missing
+credentials it silently disables x402 rather than falling back to testnet.
+
+> **WARNING:** mainnet x402 spends **real Base USDC**. Do not enable mainnet
+> mode unless you intend to move real funds. The default testnet pilot uses
+> Base Sepolia TEST USDC only.
