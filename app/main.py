@@ -257,6 +257,9 @@ async def create_customer_key(
 
 @app.post("/v1/signup")
 async def signup(req: KeyRequest):
+    if not settings.PUBLIC_SIGNUP_ENABLED:
+        # Fail closed: public signup is disabled until explicitly enabled.
+        raise HTTPException(403, "public signup disabled")
     if not req.name.strip():
         raise HTTPException(400, "name required")
     key = create_key(req.name.strip())

@@ -25,6 +25,12 @@ class Settings:
     # disabled and every admin endpoint rejects access. A strong key must be
     # supplied via the GATEWAY_ADMIN_KEY environment variable.
     ADMIN_KEY: str = _env("GATEWAY_ADMIN_KEY", "")
+    # Public self-service signup is FAIL-CLOSED by default. It must be enabled
+    # explicitly via GATEWAY_PUBLIC_SIGNUP_ENABLED=1|true|yes before the public
+    # Funnel is reopened. There is no permissive default.
+    PUBLIC_SIGNUP_ENABLED: bool = _env("GATEWAY_PUBLIC_SIGNUP_ENABLED", "false").lower() in (
+        "1", "true", "yes"
+    )
     DB_PATH: str = _env("GATEWAY_DB", "/data/gateway.db")
     STRIPE_API_KEY: str = _env("STRIPE_API_KEY", "")
     STRIPE_PUBLISHABLE_KEY: str = _env("STRIPE_PUBLISHABLE_KEY", "")

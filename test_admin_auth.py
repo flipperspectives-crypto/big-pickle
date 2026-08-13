@@ -87,13 +87,15 @@ def test_E_single_helper_fail_closed_everywhere():
     assert "x_admin_key != settings.ADMIN_KEY" not in src
 
 
-def test_F_non_admin_endpoints_unchanged():
+def test_F_non_admin_endpoints_unchanged(monkeypatch):
     # Public/customer paths are unaffected by the admin hardening.
     assert client.get("/health").status_code == 200
     m = client.get("/v1/models")
     assert m.status_code == 200
     assert "data" in m.json()
-    # Customer skey auth still works end to end.
+    # Customer skey auth still works end to end (signup explicitly enabled here
+    # so the customer-auth path can be exercised; default is now fail-closed).
+    monkeypatch.setattr(config.settings, "PUBLIC_SIGNUP_ENABLED", True)
     r = client.post("/v1/signup", json={"name": "cust-f"})
     assert r.status_code == 200, r.text
     skey = r.json()["skey"]
