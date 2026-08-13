@@ -50,6 +50,21 @@ class Settings:
     # this at the privately connected Windows Ollama via environment config.
     OLLAMA_BASE_URL: str = _norm_ollama(_env("OLLAMA_BASE_URL", "http://127.0.0.1:11434"))
 
+    # --- Perimeter guards for POST /v1/chat/completions ---------------------
+    # These protect a single-process Windows laptop from abusive or accidental
+    # public inference load. All defaults are conservative (fail toward safety)
+    # and every value is overridable via environment configuration.
+    #
+    # Max raw request body size for chat completions (bytes). 256 KiB default.
+    # Oversized bodies are rejected with 413 before any parsing/inference.
+    MAX_CHAT_REQUEST_BYTES: int = int(_env("GATEWAY_MAX_CHAT_REQUEST_BYTES", "262144"))
+    # Per authenticated key-id request rate limit (sliding window).
+    CHAT_RATE_LIMIT_REQUESTS: int = int(_env("GATEWAY_CHAT_RATE_LIMIT_REQUESTS", "10"))
+    CHAT_RATE_LIMIT_WINDOW_SECONDS: float = float(_env("GATEWAY_CHAT_RATE_LIMIT_WINDOW_SECONDS", "60"))
+    # Max concurrent local (Ollama) generations. A single GPU/CPU laptop cannot
+    # safely run more than one; default 1. Set >1 only on capable hardware.
+    LOCAL_MAX_CONCURRENCY: int = int(_env("GATEWAY_LOCAL_MAX_CONCURRENCY", "1"))
+
     def provider_key(self, name: str) -> str:
         key = _env(f"GATEWAY_{name.upper()}_KEY")
         if name == "huggingface" and not key:

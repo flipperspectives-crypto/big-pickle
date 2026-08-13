@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from . import providers, x402, local, runtime
 from .config import settings
+from .guard import ChatRateLimiter, LocalConcurrencyLimit
 from .db import (
     add_credits,
     balance_for,
@@ -59,6 +60,14 @@ app.add_middleware(
 )
 
 init_db()
+
+# Perimeter guards for POST /v1/chat/completions. Instantiated once from
+# settings; tests may monkeypatch these module-level instances (e.g. to shrink
+# the window or disable the local slot cap) without touching production code.
+_chat_rate_limiter = ChatRateLimiter(
+    settings.CHAT_RATE_LIMIT_REQUESTS, settings.CHAT_RATE_LIMIT_WINDOW_SECONDS
+)
+_local_concurrency = LocalConcurrencyLimit(settings.LOCAL_MAX_CONCURRENCY)
 
 # x402 machine-payable top-up (disabled unless X402_PAYTO is configured)
 _x402_mw = x402.build_x402_middleware()
@@ -207,24 +216,74 @@ def _public_details(m: dict) -> dict | None:
     return d or None
 
 
+async def _enforce_request_size(request: Request) -> bytes:
+    """Reject oversized chat bodies (413) and return the raw body bytes.
+
+    Measured on the ACTUAL body bytes (never trusts a spoofed Content-Length),
+    with an early reject for obviously oversized Content-Length headers. The
+    body is never logged. Returns the body so the caller can parse it once.
+    """
+    max_bytes = settings.MAX_CHAT_REQUEST_BYTES
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            if int(cl) > max_bytes:
+                raise HTTPException(413, "request payload too large")
+        except ValueError:
+            pass
+    body = await request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(413, "request payload too large")
+    return body
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
     authorization: str | None = Header(None),
     x_api_key: str | None = Header(None),
 ):
-    key = _customer_key(authorization, x_api_key)
-    try:
-        body = await request.json()
+    # Gate order: A body-size -> B auth -> C JSON/model -> D rate limit ->
+    # E balance/free-model -> F local concurrency -> G execution.
+    # Rejected-early requests (A/B/C) MUST NOT consume a rate-limit slot or a
+    # local concurrency slot.
+    raw = await _enforce_request_size(request)  # A
+
+    key = _customer_key(authorization, x_api_key)  # B
+
+    try:  # C
+        body = json.loads(raw)
     except Exception:
         raise HTTPException(400, "invalid JSON body")
-    if not body.get("model"):
+    if not isinstance(body, dict) or not body.get("model"):
         raise HTTPException(400, "model is required")
-    if balance_for(key["id"]) <= 0 and not providers.is_free_model(body.get("model", "")):
+    model = body["model"]
+
+    # D. Per-key request rate limit (only reached after auth; failed auth never
+    # records state). Retry-After hints when the window frees up.
+    allowed, retry_after = _chat_rate_limiter.check(key["id"])
+    if not allowed:
+        raise HTTPException(
+            429,
+            "rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    if balance_for(key["id"]) <= 0 and not providers.is_free_model(model):  # E
         raise HTTPException(
             402,
             "insufficient balance. Top up credits via your dashboard before continuing.",
         )
+
+    # F. Local-inference concurrency (only for local:* models). Fail fast; never
+    # block and build an unbounded backlog on the laptop.
+    local_slot = False
+    if model.startswith("local:"):
+        if not await _local_concurrency.acquire():
+            raise HTTPException(503, "local model is busy; please retry shortly.")
+        local_slot = True
+
+    # G. Execute, releasing the local slot on every exit path.
     try:
         data, _cost, _provider = await run_completion(body, key["id"])
     except UpstreamError as e:
@@ -239,6 +298,9 @@ async def chat_completions(
         # Log the exception CLASS only (no message text, no stack trace, no secrets).
         logger.warning("completion_failed exc=%s", type(e).__name__)
         raise HTTPException(502, "Gateway error. Please retry or try another model.")
+    finally:
+        if local_slot:
+            _local_concurrency.release()
     if hasattr(data, "__aiter__"):
         return StreamingResponse(data, media_type="text/event-stream")
     return data
