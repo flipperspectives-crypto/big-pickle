@@ -169,9 +169,32 @@ _DEMO_OPENAPI = {
                 "x-payment-info": {
                     "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
                     "protocols": [{"x402": {}}],
+                    "network": "eip155:84532",
                 },
                 "responses": {
                     "402": {"description": "Payment Required"},
+                    "200": {"description": "OpenAI-compatible chat completion"},
+                },
+            }
+        },
+        "/v1/x402/solana/chat/completions": {
+            "post": {
+                "operationId": "purchaseClaritySolanaDevnetChatCompletion",
+                "summary": "Buy a Clarity AI chat completion (Solana devnet x402)",
+                "description": (
+                    "Direct pay-per-request AI inference through Clarity using "
+                    "local:qwen3:1.7b, paid via Solana DEVNET x402 (TEST funds only "
+                    "-- NOT Solana mainnet). Pay the live x402 v2 challenge and "
+                    "receive an OpenAI-compatible chat completion directly. No "
+                    "Clarity API key is required. stream=false and max_tokens <= 128."
+                ),
+                "x-payment-info": {
+                    "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+                    "protocols": [{"x402": {}}],
+                    "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+                },
+                "responses": {
+                    "402": {"description": "Payment Required (Solana devnet x402)"},
                     "200": {"description": "OpenAI-compatible chat completion"},
                 },
             }
@@ -354,7 +377,9 @@ def discover_paid_routes(spec: dict) -> list[dict]:
     return routes
 
 
-def select_direct_chat_route(routes: list[dict]) -> dict:
+def select_direct_chat_route(
+    routes: list[dict], network: str | None = None
+) -> dict:
     """Choose the DIRECT paid chat/completion route from discovered metadata.
 
     Validation (fail-safe; records every rejection reason):
@@ -365,6 +390,10 @@ def select_direct_chat_route(routes: list[dict]) -> dict:
         protocols)
       * described as chat/completion (or bare inference) and NOT as gateway
         credit / top-up / skey
+    If ``network`` is supplied (e.g. ``"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1``
+    or the prefix ``"solana:"``), only candidates whose advertised
+    ``x-payment-info.network`` matches are kept -- this lets the agent pick the
+    Base EVM route vs the Solana devnet route independently.
     If no candidate qualifies, raises RuntimeError explaining why.
     """
     candidates: list[dict] = []
@@ -393,6 +422,12 @@ def select_direct_chat_route(routes: list[dict]) -> dict:
             rejected.append((path, "not described as chat/completion/inference"))
             continue
         candidates.append(r)
+    if network:
+        candidates = [
+            c
+            for c in candidates
+            if (c.get("payment") or {}).get("network", "").startswith(network)
+        ]
     if not candidates:
         reasons = "; ".join(f"{p}: {why}" for p, why in rejected)
         raise RuntimeError(
@@ -641,6 +676,7 @@ class ClarityAgent:
         model: str = "local:qwen3:1.7b",
         messages: list[dict] | None = None,
         payer_address: str = "0xAGENT_PUBLIC_ADDRESS_DEMO",
+        network: str | None = None,
     ) -> dict:
         """Drive the DIRECT machine-payable inference flow (no top-up, no skey).
 
@@ -671,7 +707,7 @@ class ClarityAgent:
         try:
             spec = self.fetch_openapi()
             paid = discover_paid_routes(spec)
-            route = select_direct_chat_route(paid)
+            route = select_direct_chat_route(paid, network=network)
             result["discovery"] = {
                 "title": (spec.get("info") or {}).get("title"),
                 "paid_routes": [r["path"] for r in paid],

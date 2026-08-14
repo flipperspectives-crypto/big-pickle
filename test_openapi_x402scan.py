@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from x402 import x402ResourceServer
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
+from x402.mechanisms.svm.exact import ExactSvmServerScheme
 from x402.schemas import PaymentRequirements
 from x402.extensions.bazaar import BAZAAR
 
@@ -24,7 +25,13 @@ import app.config as config_mod
 import app.db as db_mod
 import app.main as main_mod
 import app.x402 as x402_mod
-from app.x402 import build_topup_route, build_x402_middleware, x402_topup
+from app.x402 import (
+    build_topup_route,
+    build_x402_middleware,
+    build_solana_chat_route,
+    build_solana_x402_middleware,
+    x402_topup,
+)
 
 TESTNET_CHAIN = "eip155:84532"
 MAINNET_CHAIN = "eip155:8453"
@@ -157,10 +164,16 @@ def test_openapi_guidance_present():
     assert g and isinstance(g, str) and g.strip()
 
 
-# 5. paths contains exactly the two payable resources.
-def test_openapi_paths_only_two():
+# 5. paths contains exactly the payable resources (Base top-up, Base direct
+#    chat, and the SEPARATE Solana-devnet direct chat). Base routes are
+#    unchanged; Solana is additive only.
+def test_openapi_paths_only_three():
     _, o = _openapi()
-    assert list(o["paths"].keys()) == ["/v1/x402/topup", "/v1/x402/chat/completions"]
+    assert list(o["paths"].keys()) == [
+        "/v1/x402/topup",
+        "/v1/x402/chat/completions",
+        "/v1/x402/solana/chat/completions",
+    ]
 
 
 # 6. that path contains exactly the intended POST discovery operation.
@@ -516,3 +529,269 @@ def test_after_settle_absolute_chat_does_not_credit(monkeypatch, clarity_x402_ba
 
     _after_settle(_Ctx())
     assert calls == [], "direct chat settlement must NEVER credit gateway balance"
+
+
+# ---------------------------------------------------------------------------
+# CLARITY SOLANA: a SEPARATE Solana-devnet x402 direct-inference path.
+# These prove the new /v1/x402/solana/chat/completions route generates a
+# correct Solana x402 v2 PAYMENT-REQUIRED (devnet USDC, configured payTo,
+# absolute https resource.url), cannot be used for free inference, and its
+# settlement can NEVER credit gateway balance, while the existing Base
+# route/configuration stays unchanged. No payment is signed/settled and no
+# live inference runs (FakeFacilitator only).
+# ---------------------------------------------------------------------------
+
+SOLANA_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+SOLANA_DEVNET_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+SOLANA_TEST_PAYTO = "So11111111111111111111111111111111111111112"
+
+
+class SolanaFakeFacilitator:
+    def __init__(self):
+        self.settled = 0
+
+    async def verify(self, payload, requirements):
+        from x402.schemas.hooks import ResourceVerifyResponse
+        from x402.schemas.responses import VerifyResponse
+
+        payer = (payload.payload.get("authorization") or {}).get("from", "solana-payer")
+        rv = ResourceVerifyResponse(verify=VerifyResponse(is_valid=True, payer=payer))
+        rv.payment_payload = payload
+        rv.payment_requirements = requirements
+        return rv
+
+    async def settle(self, payload, requirements):
+        from x402.schemas.responses import SettleResponse
+
+        self.settled += 1
+        return SettleResponse(
+            success=True,
+            transaction="solana-tx",
+            network=config_mod.settings.X402_SOLANA_NETWORK,
+            payer="solana-payer",
+        )
+
+    def get_supported(self):
+        from x402.schemas import SupportedKind, SupportedResponse
+
+        return SupportedResponse(
+            kinds=[
+                SupportedKind(
+                    x402Version=2,
+                    scheme="exact",
+                    network=config_mod.settings.X402_SOLANA_NETWORK,
+                    extra={"feePayer": "FeePayer1111111111111111111111111111111111"},
+                )
+            ]
+        )
+
+
+def make_solana_app(fac):
+    server = x402ResourceServer(fac)
+    server.register(config_mod.settings.X402_SOLANA_NETWORK, ExactSvmServerScheme())
+    server.initialize()
+    mw = build_solana_x402_middleware(
+        facilitator_client=fac, server=server, sync_facilitator_on_start=False
+    )
+    assert mw is not None, "Solana middleware must build when enabled"
+    app = FastAPI()
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(BaseHTTPMiddleware, dispatch=mw)
+
+    @app.post("/v1/x402/solana/chat/completions")
+    async def solana_chat(request: Request):
+        if not getattr(request.state, "payment_payload", None):
+            raise HTTPException(503, "solana x402 not enabled")
+        raw = await request.body()
+        try:
+            body = json.loads(raw)
+        except Exception:
+            raise HTTPException(400, "invalid JSON body")
+        return await x402_mod.handle_x402_chat(body)
+
+    return app
+
+
+@pytest.fixture
+def clarity_x402_solana(tmp_path):
+    s = config_mod.settings
+    saved = {
+        "DB_PATH": s.DB_PATH,
+        "X402_PAYTO": s.X402_PAYTO,
+        "X402_NETWORK_MODE": s.X402_NETWORK_MODE,
+        "X402_CHAIN_ID": s.X402_CHAIN_ID,
+        "X402_CHAIN_INT": s.X402_CHAIN_INT,
+        "X402_ASSET": s.X402_ASSET,
+        "X402_FACILITATOR_URL": s.X402_FACILITATOR_URL,
+        "X402_RPC_URL": s.X402_RPC_URL,
+        "X402_PRICE_USD": s.X402_PRICE_USD,
+        "X402_CDP_API_KEY_ID": s.X402_CDP_API_KEY_ID,
+        "X402_CDP_API_KEY_SECRET": s.X402_CDP_API_KEY_SECRET,
+        "X402_ENABLED": s.X402_ENABLED,
+        "X402_PUBLIC_ORIGIN": s.X402_PUBLIC_ORIGIN,
+        "X402_SOLANA_ENABLED": s.X402_SOLANA_ENABLED,
+        "X402_SOLANA_PAYTO": s.X402_SOLANA_PAYTO,
+        "X402_SOLANA_NETWORK": s.X402_SOLANA_NETWORK,
+        "X402_SOLANA_FACILITATOR_URL": s.X402_SOLANA_FACILITATOR_URL,
+    }
+    s.DB_PATH = str(tmp_path / "openapi_x402_solana.db")
+    s.X402_PAYTO = EXPECTED_PAYTO
+    s.X402_NETWORK_MODE = "testnet"
+    s.X402_CHAIN_ID = TESTNET_CHAIN
+    s.X402_CHAIN_INT = 84532
+    s.X402_ASSET = TESTNET_ASSET
+    s.X402_FACILITATOR_URL = "https://x402.org/facilitator"
+    s.X402_RPC_URL = "https://sepolia.base.org"
+    s.X402_PRICE_USD = "0.001"
+    s.X402_CDP_API_KEY_ID = ""
+    s.X402_CDP_API_KEY_SECRET = ""
+    s.X402_ENABLED = False
+    s.X402_PUBLIC_ORIGIN = "https://clarity-test.example"
+    s.X402_SOLANA_ENABLED = True
+    s.X402_SOLANA_PAYTO = SOLANA_TEST_PAYTO
+    s.X402_SOLANA_NETWORK = SOLANA_NETWORK
+    s.X402_SOLANA_FACILITATOR_URL = "https://x402.org/facilitator"
+    db_mod.init_db()
+    yield
+    for k, v in saved.items():
+        setattr(s, k, v)
+
+
+# 24. Live discovery exposes the third (Solana devnet) payable route; Base
+#     entries are unchanged.
+def test_openapi_solana_discovery_present():
+    _, o = _openapi()
+    sol_post = o["paths"]["/v1/x402/solana/chat/completions"]["post"]
+    assert sol_post["operationId"] == "purchaseClaritySolanaDevnetChatCompletion"
+    assert sol_post["summary"] == "Buy a Clarity AI chat completion (Solana devnet x402)"
+    assert sol_post["x-payment-info"]["network"] == SOLANA_NETWORK
+    # Base discovery is untouched.
+    base_post = o["paths"]["/v1/x402/chat/completions"]["post"]
+    assert base_post["operationId"] == "purchaseClarityChatCompletion"
+
+
+# 25. Solana route generates HTTP 402 with correct x402 v2 / Solana devnet
+#     payment requirements.
+def test_solana_402_intact(clarity_x402_solana):
+    fac = SolanaFakeFacilitator()
+    client = TestClient(make_solana_app(fac))
+    r = client.post("/v1/x402/solana/chat/completions", json={})
+    assert r.status_code == 402, (r.status_code, r.text)
+    obj = json.loads(base64.b64decode(r.headers["payment-required"]))
+    assert obj["x402Version"] == 2
+    a = obj["accepts"][0]
+    assert a["scheme"] == "exact"
+    assert a["network"] == SOLANA_NETWORK
+    assert a["asset"] == SOLANA_DEVNET_USDC
+    assert a["amount"] == "1000"
+    assert a["payTo"] == SOLANA_TEST_PAYTO
+    assert a["maxTimeoutSeconds"] == 60
+    # SVM scheme injects a feePayer from the facilitator supported kind.
+    assert a["extra"]["feePayer"]
+
+
+# 26. Solana resource.url MUST be an absolute https:// URL (same fix as Base).
+def test_solana_resource_url_absolute_https(clarity_x402_solana):
+    fac = SolanaFakeFacilitator()
+    client = TestClient(make_solana_app(fac))
+    r = client.post("/v1/x402/solana/chat/completions", json={})
+    obj = json.loads(base64.b64decode(r.headers["payment-required"]))
+    url = obj["resource"]["url"]
+    assert url.startswith("https://"), url
+    assert url == f"https://clarity-test.example/v1/x402/solana/chat/completions", url
+
+
+# 27. Bazaar metadata present on the Solana route (real SDK-generated shape:
+#     info.output is {"type": "json", "example": {...}}, not "contentType").
+def test_solana_bazaar_present(clarity_x402_solana):
+    route = x402_mod.build_solana_chat_route()
+    assert BAZAAR.key in route.extensions
+    bazaar_info = route.extensions[BAZAAR.key]["info"]
+    assert bazaar_info["output"]["type"] == "json"
+    assert bazaar_info["input"]["method"] == "POST"
+
+
+# 28. Solana route cannot be used for free inference (no payment -> 402).
+def test_solana_cannot_execute_free(clarity_x402_solana):
+    fac = SolanaFakeFacilitator()
+    client = TestClient(make_solana_app(fac))
+    r = client.post(
+        "/v1/x402/solana/chat/completions",
+        json={"model": "local:qwen3:1.7b", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 402
+    assert fac.settled == 0
+
+
+# 29. Settlement of the Solana resource can NEVER credit gateway balance.
+def test_solana_after_settle_does_not_credit(monkeypatch, clarity_x402_solana):
+    import types
+
+    calls = []
+    monkeypatch.setattr(
+        x402_mod,
+        "settle_x402_credit",
+        lambda **kw: calls.append(kw) or {"id": "c1"},
+    )
+
+    class _Payload:
+        resource = types.SimpleNamespace(
+            url="https://clarity-test.example/v1/x402/solana/chat/completions"
+        )
+        payload = {"authorization": {"from": "solana-payer"}}
+
+    class _Req:
+        network = SOLANA_NETWORK
+        asset = SOLANA_DEVNET_USDC
+        amount = "1000"
+
+    class _Res:
+        payer = "solana-payer"
+        transaction = "solana-tx"
+
+    class _Ctx:
+        payment_payload = _Payload()
+        requirements = _Req()
+        result = _Res()
+
+    x402_mod._after_settle(_Ctx())
+    assert calls == [], "Solana direct settlement must NEVER credit gateway balance"
+
+
+# 30. Missing Solana payTo fails closed (middleware is None even when enabled).
+def test_solana_missing_payto_fails_closed(clarity_x402_solana):
+    s = config_mod.settings
+    s.X402_SOLANA_ENABLED = True
+    s.X402_SOLANA_PAYTO = ""
+    try:
+        assert build_solana_x402_middleware(facilitator_client=SolanaFakeFacilitator()) is None
+    finally:
+        s.X402_SOLANA_ENABLED = False
+        s.X402_SOLANA_PAYTO = SOLANA_TEST_PAYTO
+
+
+# 31. Solana mainnet is rejected (fail-closed guardrail): only the devnet CAIP-2
+#     is accepted for this devnet build. The guard runs on every Settings
+#     construction, so we pass the values explicitly (env is read at import).
+def test_solana_mainnet_rejected():
+    from app.config import Settings
+
+    with pytest.raises(RuntimeError):
+        Settings(
+            X402_SOLANA_ENABLED=True,
+            X402_SOLANA_PAYTO=SOLANA_TEST_PAYTO,
+            X402_SOLANA_NETWORK="solana:5eykt4UsFv8P8NJdTREpY1vzqKvdp",
+        )
+
+
+# 31b. The Solana DEVNET CAIP-2 is explicitly accepted (proves the guard only
+#      blocks mainnet, not the intended devnet build).
+def test_solana_devnet_accepted():
+    from app.config import Settings
+
+    s = Settings(
+        X402_SOLANA_ENABLED=True,
+        X402_SOLANA_PAYTO=SOLANA_TEST_PAYTO,
+        X402_SOLANA_NETWORK="solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    )
+    assert s.X402_SOLANA_NETWORK == "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"

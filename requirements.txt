@@ -2,7 +2,7 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 httpx>=0.27
 stripe>=9.0
-x402[fastapi,evm]
+x402[fastapi,evm,svm]
 # Bazaar v2 discovery metadata (declare_discovery_extension /
 # bazaar_resource_server_extension) requires jsonschema for extension
 # validation and schema building. Needed so app.x402 can attach discovery to

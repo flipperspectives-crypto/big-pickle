@@ -78,6 +78,34 @@ FAKE_CHAT_PR_HEADER = base64.b64encode(
     ).encode()
 ).decode()
 
+# Mirrors what /v1/x402/solana/chat/completions (the SEPARATE Solana-devnet
+# direct-inference route) sends. Solana devnet CAIP-2, devnet USDC asset, and a
+# configured public Solana payTo -- all TEST funds, never Solana mainnet.
+SOLANA_DEVNET_CAIP2 = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+SOLANA_DEVNET_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+SOLANA_TEST_PAYTO = "So11111111111111111111111111111111111111112"
+
+FAKE_SOLANA_PR_HEADER = base64.b64encode(
+    json.dumps(
+        {
+            "x402Version": 2,
+            "resource": {"url": f"{DEFAULT_BASE_URL}/v1/x402/solana/chat/completions"},
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": SOLANA_DEVNET_CAIP2,
+                    "asset": SOLANA_DEVNET_USDC,
+                    "amount": "1000",
+                    "payTo": SOLANA_TEST_PAYTO,
+                    "maxTimeoutSeconds": 60,
+                    "extra": {"feePayer": "FeePayer1111111111111111111111111111111111"},
+                }
+            ],
+        }
+    ).encode()
+).decode()
+
+
 # Value-like markers that should NEVER appear in any output. Descriptive words
 # ("authorization", "bearer", "private") are intentionally excluded so the
 # plan's explanatory text does not trigger false positives.
@@ -122,6 +150,7 @@ _DEFAULT_OPENAPI = {
                 "x-payment-info": {
                     "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
                     "protocols": [{"x402": {}}],
+                    "network": "eip155:84532",
                 },
                 "responses": {"402": {"description": "Payment Required"}},
             }
@@ -179,6 +208,24 @@ def _make_transport(calls=None, openapi_doc=None):
                     "object": "chat.completion",
                     "choices": [
                         {"message": {"role": "assistant", "content": "hi direct"}}
+                    ],
+                },
+            )
+        if request.method == "POST" and path == "/v1/x402/solana/chat/completions":
+            # SEPARATE Solana-devnet direct-inference challenge: unpaid -> 402 +
+            # PAYMENT-REQUIRED (resource /v1/x402/solana/chat/completions).
+            # Paid retry -> completion, no skey.
+            if "PAYMENT-SIGNATURE" not in request.headers:
+                return httpx.Response(
+                    402, headers={"PAYMENT-REQUIRED": FAKE_SOLANA_PR_HEADER}, json={}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-solana",
+                    "object": "chat.completion",
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "hi solana"}}
                     ],
                 },
             )
@@ -588,3 +635,68 @@ def test_agent_quickstart_no_longer_claims_single_challenge():
     # Both machine-payable resources are now documented.
     assert "/v1/x402/topup" in text
     assert "/v1/x402/chat/completions" in text
+
+
+# ---------------------------------------------------------------------------
+# CLARITY SOLANA: a SEPARATE Solana-devnet direct-inference x402 route.
+# The agent must be able to (a) discover it, (b) obtain its 402, (c) parse the
+# network/asset/amount/payTo, (d) STOP before signing (dry-run), and (e) never
+# transmit a PAYMENT-SIGNATURE. Existing Base discovery/flow tests are
+# unaffected.
+# ---------------------------------------------------------------------------
+
+# A discovery doc advertising ALL three routes so the network filter can be
+# proven to pick Base vs Solana independently.
+_SOLANA_OPENAPI = json.loads(json.dumps(_DEFAULT_OPENAPI))
+_SOLANA_OPENAPI["paths"]["/v1/x402/solana/chat/completions"] = {
+    "post": {
+        "operationId": "purchaseClaritySolanaDevnetChatCompletion",
+        "summary": "Buy a Clarity AI chat completion (Solana devnet x402)",
+        "description": (
+            "Direct pay-per-request AI inference through Clarity using "
+            "local:qwen3:1.7b, paid via Solana DEVNET x402. No Clarity API key."
+        ),
+        "x-payment-info": {
+            "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+            "protocols": [{"x402": {}}],
+            "network": SOLANA_DEVNET_CAIP2,
+        },
+        "responses": {"402": {"description": "Payment Required"}},
+    }
+}
+
+
+def test_select_direct_chat_route_network_filter():
+    paid = discover_paid_routes(_SOLANA_OPENAPI)
+    sol = select_direct_chat_route(paid, network=SOLANA_DEVNET_CAIP2)
+    assert sol["path"] == "/v1/x402/solana/chat/completions"
+    base = select_direct_chat_route(paid, network="eip155:84532")
+    assert base["path"] == "/v1/x402/chat/completions"
+    # Without a network hint, the Base direct chat route is still preferred.
+    default = select_direct_chat_route(paid)
+    assert default["path"] == "/v1/x402/chat/completions"
+
+
+def test_agent_solana_dry_run_discovers_and_stops():
+    calls = []
+    transport = _make_transport(calls, openapi_doc=_SOLANA_OPENAPI)
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    result = asyncio.run(agent.run_direct(network=SOLANA_DEVNET_CAIP2))
+    assert result["mode"] == "dry-run"
+    assert result["discovery"]["selected_route"] == "/v1/x402/solana/chat/completions"
+    pr = result["payment_required"]
+    assert pr["network"] == SOLANA_DEVNET_CAIP2
+    assert pr["asset"] == SOLANA_DEVNET_USDC
+    assert pr["amount"] == "1000"
+    assert pr["pay_to"] == SOLANA_TEST_PAYTO
+    assert pr["resource"] == f"{DEFAULT_BASE_URL}/v1/x402/solana/chat/completions"
+    # Dry-run must STOP before signing/settling.
+    assert result["payment_signed"] is False
+    assert result["settlement_verified"] is False
+    assert result["gateway_credit_verified"] is False
+    assert result["inference_verified"] is False
+    # No PAYMENT-SIGNATURE is ever transmitted.
+    assert not [c for c in calls if "PAYMENT-SIGNATURE" in (c[2] or {})]
+    sol_calls = [c for c in calls if c[1] == "/v1/x402/solana/chat/completions"]
+    assert len(sol_calls) == 1
+    assert "PAYMENT-SIGNATURE" not in (sol_calls[0][2] or {})

@@ -59,6 +59,7 @@ log = logging.getLogger("x402")
 # settlement hook uses payment_payload.resource.url to tell them apart.
 TOPUP_ROUTE = "/v1/x402/topup"
 CHAT_ROUTE = "/v1/x402/chat/completions"
+SOLANA_CHAT_ROUTE = "/v1/x402/solana/chat/completions"
 
 # Direct-paid inference is restricted to this single local model for the MVP.
 DIRECT_MODEL = "local:qwen3:1.7b"
@@ -290,6 +291,108 @@ def build_chat_route() -> RouteConfig:
         mime_type="application/json",
         service_name="Clarity",
         extensions=bazaar_extension,
+    )
+
+
+def build_solana_chat_route() -> RouteConfig:
+    """Build the Solana-devnet x402 direct-inference route.
+
+    Uses the SVM (Solana) exact scheme. The asset (devnet USDC mint) and the
+    facilitator fee payer are derived automatically by the x402 SVM scheme from
+    ``X402_SOLANA_NETWORK``; ``PaymentOption`` has no explicit asset field, so we
+    only supply scheme/network/payTo/price. Reuses the same hardened direct
+    inference input/output schema as the Base EVM direct route.
+    """
+    option = PaymentOption(
+        scheme="exact",
+        pay_to=settings.X402_SOLANA_PAYTO,
+        price=settings.X402_PRICE_USD,
+        network=settings.X402_SOLANA_NETWORK,
+        max_timeout_seconds=60,
+        extra={},
+    )
+    bazaar_extension = declare_discovery_extension(
+        input={
+            "model": DIRECT_MODEL,
+            "messages": [
+                {"role": "user", "content": "Say hello in one sentence."}
+            ],
+        },
+        input_schema=_CHAT_INPUT_SCHEMA,
+        body_type="json",
+        output=OutputConfig(
+            example={
+                "id": "chatcmpl-solana-example",
+                "object": "chat.completion",
+                "model": "qwen3:1.7b",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello from Clarity (Solana devnet).",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        ),
+    )
+    bazaar_extension[BAZAAR.key]["info"]["input"]["method"] = "POST"
+    return RouteConfig(
+        accepts=option,
+        resource=_absolute_resource(SOLANA_CHAT_ROUTE),
+        description=(
+            "Direct pay-per-request AI inference through Clarity using "
+            f"{DIRECT_MODEL}, paid via Solana DEVNET x402 (TEST funds only -- NOT "
+            "Solana mainnet). Pay the live x402 v2 challenge and receive an "
+            "OpenAI-compatible chat completion directly. No Clarity API key required."
+        ),
+        mime_type="application/json",
+        service_name="Clarity",
+        extensions=bazaar_extension,
+    )
+
+
+def build_solana_x402_middleware(
+    facilitator_client=None,
+    server=None,
+    sync_facilitator_on_start: bool = True,
+):
+    """Build the Solana-devnet x402 payment middleware, or None if disabled.
+
+    Fail-closed: returns None unless ``X402_SOLANA_ENABLED`` and a valid public
+    Solana payTo are configured. The SVM server scheme is imported lazily so
+    Base/EVM hosts without Solana packages keep importing and running. Uses its
+    own x402.org facilitator (separate from the Base CDP/mainnet facilitator)
+    because a single resource server binds to a single facilitator.
+    """
+    if not settings.X402_SOLANA_ENABLED:
+        log.debug("X402_SOLANA_ENABLED not set; Solana route disabled")
+        return None
+    if not settings.X402_SOLANA_PAYTO:
+        log.warning("X402_SOLANA_PAYTO not set; Solana route disabled (fail closed)")
+        return None
+    try:
+        from x402.mechanisms.svm.exact import ExactSvmServerScheme
+    except ImportError as e:
+        log.warning("Solana SVM packages missing; Solana route disabled: %s", e)
+        return None
+    if facilitator_client is None:
+        facilitator_client = HTTPFacilitatorClient(
+            FacilitatorConfig(url=settings.X402_SOLANA_FACILITATOR_URL)
+        )
+    if server is None:
+        server = x402ResourceServer(facilitator_client)
+        server.register(settings.X402_SOLANA_NETWORK, ExactSvmServerScheme())
+    # Register the Bazaar resource-server extension and reuse the SAME after_settle
+    # guard (never credits anything but the top-up resource) for defense-in-depth.
+    server.register_extension(bazaar_resource_server_extension)
+    server.on_after_settle(_after_settle)
+    routes = {SOLANA_CHAT_ROUTE: build_solana_chat_route()}
+    return payment_middleware(
+        routes, server, sync_facilitator_on_start=sync_facilitator_on_start
     )
 
 

@@ -54,6 +54,56 @@ class Settings:
     X402_PUBLIC_ORIGIN: str = _env(
         "X402_PUBLIC_ORIGIN", "https://desktop-o99r0sf.tail935fba.ts.net"
     ).rstrip("/")
+    # Solana DEVNET x402 direct-inference path (separate from Base EVM). This is
+    # DEVNET-ONLY: it must never be pointed at Solana mainnet. The receiving
+    # address is a PUBLIC wallet address only -- no private key is ever stored,
+    # requested, or used server-side.
+    X402_SOLANA_ENABLED: bool = _env("X402_SOLANA_ENABLED", "false").lower() in (
+        "1", "true", "yes"
+    )
+    X402_SOLANA_PAYTO: str = _env("X402_SOLANA_PAYTO", "")  # PUBLIC Solana address only
+    X402_SOLANA_NETWORK: str = _env(
+        "X402_SOLANA_NETWORK", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+    )
+    X402_SOLANA_FACILITATOR_URL: str = _env(
+        "X402_SOLANA_FACILITATOR_URL", "https://x402.org/facilitator"
+    )
+
+    # Fail-closed guardrails for the Solana devnet path. It must NEVER be mainnet,
+    # and a receiving address is mandatory when enabled. The address shape is
+    # validated inline (base58, 32-44 chars) without importing the x402 SVM
+    # packages, so config loading never requires Solana dependencies on Base-only
+    # hosts.
+    _SVM_ADDRESS_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+    _SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKvdp"
+
+    def __init__(self, **overrides):
+        # Permit programmatic overrides (tests, future dynamic reconfiguration)
+        # while re-running the fail-closed Solana devnet guardrails on EVERY
+        # construction -- not only at import time when the class body executes,
+        # so a Solana mainnet CAIP-2 value can never be accepted.
+        for key, value in overrides.items():
+            setattr(self, key, value)
+        self._validate_solana_guardrails()
+
+    def _validate_solana_guardrails(self):
+        if not self.X402_SOLANA_ENABLED:
+            return
+        if (
+            self.X402_SOLANA_NETWORK == self._SOLANA_MAINNET_CAIP2
+            or "mainnet" in self.X402_SOLANA_NETWORK.lower()
+        ):
+            raise RuntimeError(
+                "X402_SOLANA_NETWORK must be Solana DEVNET "
+                f"({self.X402_SOLANA_NETWORK!r}); Solana mainnet is not permitted."
+            )
+        if not self.X402_SOLANA_PAYTO or not __import__("re").match(
+            self._SVM_ADDRESS_REGEX, self.X402_SOLANA_PAYTO
+        ):
+            raise RuntimeError(
+                "X402_SOLANA_ENABLED is true but X402_SOLANA_PAYTO is missing or not a "
+                "valid public Solana address (base58, 32-44 chars). Refusing to start."
+            )
 
     _X402_TESTNET = {
         "chain_id": "eip155:84532",

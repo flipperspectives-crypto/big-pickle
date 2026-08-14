@@ -74,6 +74,13 @@ _x402_mw = x402.build_x402_middleware()
 if _x402_mw is not None:
     app.add_middleware(BaseHTTPMiddleware, dispatch=_x402_mw)
 
+# x402 Solana-devnet direct inference (disabled unless X402_SOLANA_ENABLED and a
+# valid public Solana payTo are configured). Separate middleware + facilitator
+# from the Base EVM path; disjoint routes so each passes through the other.
+_x402_solana_mw = x402.build_solana_x402_middleware()
+if _x402_solana_mw is not None:
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_x402_solana_mw)
+
 _STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 if os.path.isdir(_STATIC):
     app.mount("/static", StaticFiles(directory=_STATIC), name="static")
@@ -552,6 +559,36 @@ async def x402_chat_completions(request: Request):
             _local_concurrency.release()
 
 
+@app.post("/v1/x402/solana/chat/completions")
+async def x402_solana_chat_completions(request: Request):
+    # Fail-closed: this route must NEVER serve free local inference. The x402
+    # Solana middleware verifies payment and, on success, attaches the verified
+    # payment payload to request.state before calling this handler. If no
+    # verified payment is present, refuse service.
+    if not settings.X402_SOLANA_ENABLED:
+        raise HTTPException(501, "solana x402 not configured")
+    if not getattr(request.state, "payment_payload", None):
+        raise HTTPException(503, "x402 payments are not enabled on this server")
+    # Gate order mirrors the Base direct route: A body-size -> B local
+    # concurrency -> C handler validation + execution. NO auth, NO gateway
+    # balance check, NO credit creation. Reuses the same hardened direct local
+    # inference logic. A Solana direct payment must NEVER credit top-up balance.
+    raw = await _enforce_request_size(request)  # A
+    try:  # C (validation + execution)
+        body = json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+    local_slot = False  # B (local inference concurrency)
+    if not await _local_concurrency.acquire():
+        raise HTTPException(503, "local model is busy; please retry shortly.")
+    local_slot = True
+    try:
+        return await x402.handle_x402_chat(body)
+    finally:
+        if local_slot:
+            _local_concurrency.release()
+
+
 @app.post("/v1/checkout")
 async def create_checkout(
     request: Request,
@@ -846,6 +883,43 @@ def discovery_openapi() -> dict:
             },
         },
     }
+    solana_chat = {
+        "operationId": "purchaseClaritySolanaDevnetChatCompletion",
+        "summary": "Buy a Clarity AI chat completion (Solana devnet x402)",
+        "description": (
+            "Direct pay-per-request AI inference through Clarity using "
+            "local:qwen3:1.7b, paid via Solana DEVNET x402 (TEST funds only -- "
+            "NOT Solana mainnet). Pay the live x402 v2 challenge and receive an "
+            "OpenAI-compatible chat completion directly. No Clarity API key is "
+            "required. stream=false and max_tokens <= 128."
+        ),
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _CHAT_INPUT_SCHEMA,
+                    "example": {
+                        "model": "local:qwen3:1.7b",
+                        "messages": [{"role": "user", "content": "Say hello in one sentence."}],
+                    },
+                }
+            },
+        },
+        "x-payment-info": {
+            "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+            "protocols": [{"x402": {}}],
+            "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        },
+        "responses": {
+            "400": {"description": "Invalid request (bad model, messages, tokens, or streaming)"},
+            "402": {"description": "Payment Required (Solana devnet x402)"},
+            "503": {"description": "Local inference slot unavailable"},
+            "200": {
+                "description": "OpenAI-compatible chat completion",
+                "content": {"application/json": {"schema": _CHAT_OUTPUT_SCHEMA}},
+            },
+        },
+    }
     return {
         "openapi": "3.1.0",
         "info": {
@@ -857,6 +931,7 @@ def discovery_openapi() -> dict:
         "paths": {
             "/v1/x402/topup": {"post": topup},
             "/v1/x402/chat/completions": {"post": chat},
+            "/v1/x402/solana/chat/completions": {"post": solana_chat},
         },
     }
 
