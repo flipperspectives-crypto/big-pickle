@@ -320,6 +320,31 @@ def test_update_null_runtime_evidence_safe(scripts):
     assert "if ($startEv -and $startEv.runtime_commit)" in t
 
 
+def test_update_installs_requirements_into_venv(scripts):
+    t = scripts["Update-Clarity.ps1"]
+    # The venv must live under the repo dir (C:\Users\fyou1\clarity\.venv on the
+    # host), so the install never touches a global/system interpreter.
+    assert re.search(r"Join-Path\s+\$RepoDir\s+'.venv", t), "venv must live under repo dir"
+    # Install must use the venv python, not a global pip/python.
+    assert re.search(r"\$VenvPython\s+-m\s+pip\s+install\s+-r", t), \
+        "updater must install requirements via the venv python"
+    assert "requirements.txt" in t
+    # The install must run before (re)starting or reusing Clarity.
+    pip_idx = t.find("-m pip install -r")
+    start_idx = t.find("Start-Clarity.ps1")
+    assert pip_idx != -1 and start_idx != -1 and pip_idx < start_idx, \
+        "requirements install must run before starting/reusing Clarity"
+    # Must not perform a global or --user install.
+    assert not re.search(r"(?m)^\s*pip\s+install\b", t), "must not call global pip"
+    assert not re.search(r"pip\s+install\b[^\n]*--user", t), "must not use --user install"
+    # Skips re-install when requirements are byte-for-byte unchanged.
+    assert "Get-FileHash" in t and "requirements.sha256.txt" in t
+    # Does not handle or expose secrets.
+    low = t.lower()
+    for b in ("sk-", "gw_", "password", "bearer ", "api_key =", "secret"):
+        assert b not in low, f"updater may contain credential token '{b}'"
+
+
 def test_rollback_null_failure_path_safe(scripts):
     t = scripts["Rollback-Clarity.ps1"]
     # null guard before dereferencing runtime_commit

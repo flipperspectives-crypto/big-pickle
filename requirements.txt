@@ -3,6 +3,12 @@ uvicorn[standard]>=0.30
 httpx>=0.27
 stripe>=9.0
 x402[fastapi,evm,svm]
+# Pin solana to 0.39.0. The x402 2.19.0 SVM payment path imports
+# solana.rpc.api.Client, which was removed in solana 0.40.x and breaks the
+# dependency set at runtime (SOLANA RPC FAIL / X402 SVM FAIL). 0.39.0 is the
+# version verified working with x402 2.19.0 and resolves a compatible solders
+# automatically, so solders is intentionally left unpinned.
+solana==0.39.0
 # Bazaar v2 discovery metadata (declare_discovery_extension /
 # bazaar_resource_server_extension) requires jsonschema for extension
 # validation and schema building. Needed so app.x402 can attach discovery to

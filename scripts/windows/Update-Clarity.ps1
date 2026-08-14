@@ -39,6 +39,44 @@ function Assert-CleanTree {
     }
 }
 
+function Write-Step($msg) { Write-Host "[update] $msg" }
+
+function Install-RequiresIntoVenv {
+    # Ensure the repo's COMMITTED requirements are installed into the project
+    # .venv (never globally) before (re)starting Clarity. This prevents a
+    # dependency-changing fast-forward from leaving a stale venv missing
+    # packages (e.g. the x402 SVM/solana set after moving from
+    # x402[fastapi,evm] to x402[fastapi,evm,svm]). Installation is skipped when
+    # requirements.txt is byte-for-byte unchanged since the last successful
+    # update, so an up-to-date venv is never reinstalled needlessly.
+    $VenvPython  = Join-Path $RepoDir '.venv\Scripts\python.exe'
+    $reqFile     = Join-Path $RepoDir 'requirements.txt'
+    $reqHashFile = Join-Path $LauncherDir 'requirements.sha256.txt'
+
+    if (-not (Test-Path $VenvPython)) {
+        Write-Error "Virtualenv python not found at $VenvPython; cannot install dependencies"
+    }
+    if (-not (Test-Path $reqFile)) {
+        Write-Error "requirements.txt not found at $reqFile"
+    }
+
+    $newHash = (Get-FileHash -Algorithm SHA256 $reqFile).Hash
+    $oldHash = $null
+    if (Test-Path $reqHashFile) { $oldHash = (Get-Content $reqHashFile -Raw).Trim() }
+
+    if ($newHash -eq $oldHash) {
+        Write-Step "requirements unchanged since last update; skipping venv install"
+        return
+    }
+
+    Write-Step "requirements changed; installing into project .venv (not global)"
+    & $VenvPython -m pip install -r $reqFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "pip install into .venv failed (exit $LASTEXITCODE)"
+    }
+    Set-Content -Path $reqHashFile -Value $newHash -Encoding utf8
+}
+
 Assert-CleanTree
 git -C $RepoDir fetch --prune origin
 
@@ -75,9 +113,14 @@ if (-not $alreadyCurrent) {
 # Hard git verification.
 $newHead = Get-Sha HEAD
 $branch  = (git -C $RepoDir rev-parse --abbrev-ref HEAD).Trim()
-if ($newHead -ne $originMain -or $branch -ne 'main') {
-    Write-Error "Git verification failed after update."
-}
+    if ($newHead -ne $originMain -or $branch -ne 'main') {
+        Write-Error "Git verification failed after update."
+    }
+
+# Ensure committed requirements are installed into the project .venv (never
+# globally) before (re)starting Clarity, so a dependency-changing fast-forward
+# can never leave a stale venv missing packages.
+Install-RequiresIntoVenv
 
 # Run Start attestation; a failure must NOT be reported as success.
 $runtimeOk = $false
