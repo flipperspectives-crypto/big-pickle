@@ -69,6 +69,15 @@ from eth_account import Account  # noqa: E402
 
 DEFAULT_BASE_URL = "https://example.invalid"
 
+# Preferred direct paid-inference route (used only as a unit-test convenience
+# fallback; the discovery decision always derives the path from OpenAPI metadata).
+DIRECT_CHAT_ROUTE = "/v1/x402/chat/completions"
+
+# Selection hints: a direct inference route is described with chat/completion (or
+# bare "inference") and must NOT read as gateway credit / top-up / skey.
+_CHAT_HINTS = ("chat", "completion")
+_CREDIT_HINTS = ("credit", "top-up", "topup", "skey", "balance")
+
 
 # A realistic x402 v2 PAYMENT-REQUIRED header, mirroring what the production
 # /v1/x402/topup endpoint returns. Used only by the offline demo transport.
@@ -117,6 +126,60 @@ _DEMO_CHAT_PR_HEADER = base64.b64encode(
 ).decode()
 
 
+# Curated OpenAPI discovery doc (mirrors what the gateway serves at
+# /openapi.json). It advertises exactly the two x402-paid resources, each with
+# an `x-payment-info` block and a description the agent uses for route selection.
+_DEMO_OPENAPI = {
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Clarity Agent API",
+        "version": "0.1.0",
+        "x-guidance": "Clarity provides pay-per-use AI inference.",
+    },
+    "paths": {
+        "/v1/x402/topup": {
+            "post": {
+                "operationId": "purchaseClarityInferenceCredit",
+                "summary": "Purchase Clarity AI inference credit",
+                "description": (
+                    "Machine-payable top-up. The caller makes an x402 v2 payment and, "
+                    "after successful settlement, receives gateway credit plus a secret "
+                    "skey used to authenticate inference at POST /v1/chat/completions."
+                ),
+                "x-payment-info": {
+                    "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+                    "protocols": [{"x402": {}}],
+                },
+                "responses": {
+                    "402": {"description": "Payment Required"},
+                    "200": {"description": "Clarity gateway credit"},
+                },
+            }
+        },
+        "/v1/x402/chat/completions": {
+            "post": {
+                "operationId": "purchaseClarityChatCompletion",
+                "summary": "Buy a Clarity AI chat completion",
+                "description": (
+                    "Direct pay-per-request AI inference through Clarity using "
+                    "local:qwen3:1.7b. Pay the live x402 challenge and receive an "
+                    "OpenAI-compatible chat completion directly. No Clarity API key "
+                    "is required. stream=false and max_tokens <= 128."
+                ),
+                "x-payment-info": {
+                    "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+                    "protocols": [{"x402": {}}],
+                },
+                "responses": {
+                    "402": {"description": "Payment Required"},
+                    "200": {"description": "OpenAI-compatible chat completion"},
+                },
+            }
+        },
+    },
+}
+
+
 def _demo_transport() -> httpx.MockTransport:
     """Offline transport that reproduces the production endpoint shapes."""
 
@@ -140,6 +203,8 @@ def _demo_transport() -> httpx.MockTransport:
                     "timestamp": "2026-08-12T00:00:00Z",
                 },
             )
+        if request.method == "GET" and path == "/openapi.json":
+            return httpx.Response(200, json=_DEMO_OPENAPI)
         if request.method == "POST" and path == "/v1/x402/topup":
             if "PAYMENT-SIGNATURE" not in request.headers:
                 return httpx.Response(
@@ -245,6 +310,114 @@ def discover_clarity(base_url: str = DEFAULT_BASE_URL) -> dict:
         return r.json()
 
 
+# ---------------------------------------------------------------------------
+# Machine-readable discovery (OpenAPI). The gateway serves a curated OpenAPI at
+# /openapi.json that advertises exactly the x402-paid resources, each with an
+# `x-payment-info` block (price + protocol) and a description. This is the single
+# discovery surface the agent uses; no path is hard-coded into the decision.
+# ---------------------------------------------------------------------------
+def fetch_openapi(base_url: str = DEFAULT_BASE_URL) -> dict:
+    """Module-level helper: GET /openapi.json using a fresh client."""
+    with httpx.Client(timeout=30) as client:
+        r = client.get(base_url.rstrip("/") + "/openapi.json")
+        r.raise_for_status()
+        return r.json()
+
+
+def discover_paid_routes(spec: dict) -> list[dict]:
+    """Extract POST routes that carry an `x-payment-info` (x402-paid) block.
+
+    Returns a list of normalized route dicts with path, method, operation_id,
+    summary, description and payment metadata. Non-POST and non-paid routes are
+    excluded here; finer selection happens in `select_direct_chat_route`.
+    """
+    routes: list[dict] = []
+    for path, ops in (spec.get("paths") or {}).items():
+        if not isinstance(ops, dict):
+            continue
+        for method, op in ops.items():
+            if method.lower() != "post" or not isinstance(op, dict):
+                continue
+            payment = op.get("x-payment-info")
+            if not payment:
+                continue
+            routes.append(
+                {
+                    "path": path,
+                    "method": method.upper(),
+                    "operation_id": op.get("operationId"),
+                    "summary": op.get("summary") or "",
+                    "description": op.get("description") or "",
+                    "payment": payment,
+                }
+            )
+    return routes
+
+
+def select_direct_chat_route(routes: list[dict]) -> dict:
+    """Choose the DIRECT paid chat/completion route from discovered metadata.
+
+    Validation (fail-safe; records every rejection reason):
+      * method must be POST
+      * path must be a same-origin relative path (starts with "/") — absolute
+        URLs are treated as cross-origin and rejected
+      * payment metadata must be internally consistent (amount present, x402 in
+        protocols)
+      * described as chat/completion (or bare inference) and NOT as gateway
+        credit / top-up / skey
+    If no candidate qualifies, raises RuntimeError explaining why.
+    """
+    candidates: list[dict] = []
+    rejected: list[tuple[str, str]] = []
+    for r in routes:
+        if r["method"] != "POST":
+            rejected.append((r.get("path"), "method is not POST"))
+            continue
+        path = r["path"]
+        if not isinstance(path, str) or not path.startswith("/"):
+            rejected.append((path, "cross-origin or non-local path (not same origin)"))
+            continue
+        price = (r.get("payment") or {}).get("price") or {}
+        if not price.get("amount"):
+            rejected.append((path, "payment metadata missing amount"))
+            continue
+        protocols = (r.get("payment") or {}).get("protocols") or []
+        if not any(isinstance(p, dict) and "x402" in p for p in protocols):
+            rejected.append((path, "not an x402-paid route"))
+            continue
+        text = ((r.get("summary") or "") + " " + (r.get("description") or "")).lower()
+        if any(k in text for k in _CREDIT_HINTS):
+            rejected.append((path, "described as gateway credit/top-up, not direct inference"))
+            continue
+        if not any(k in text for k in _CHAT_HINTS) and "inference" not in text:
+            rejected.append((path, "not described as chat/completion/inference"))
+            continue
+        candidates.append(r)
+    if not candidates:
+        reasons = "; ".join(f"{p}: {why}" for p, why in rejected)
+        raise RuntimeError(
+            "No suitable direct paid inference route found in discovery metadata"
+            + (f" (rejected: {reasons})" if reasons else "")
+        )
+    # Prefer an explicit chat/completion match when several candidates remain.
+    if len(candidates) > 1:
+        chat = [
+            c
+            for c in candidates
+            if "chat" in (c.get("summary") or "").lower()
+            or "chat" in (c.get("operation_id") or "").lower()
+            or "completion" in (c.get("summary") or "").lower()
+        ]
+        if chat:
+            candidates = chat
+    chosen = dict(candidates[0])
+    chosen["selection_reason"] = (
+        f"Selected {chosen['path']} ({chosen['method']}): x402-paid, described as "
+        "direct chat/completion inference, same origin, payment metadata consistent."
+    )
+    return chosen
+
+
 class ClarityAgent:
     """Drives the Clarity machine-payable top-up + inference lifecycle."""
 
@@ -284,6 +457,12 @@ class ClarityAgent:
         r = self.client.get(self.base_url + "/v1/status")
         return r.status_code, _safe_json(r), r.headers
 
+    def fetch_openapi(self) -> dict:
+        """GET /openapi.json via this agent's client (honors transport/timeout)."""
+        r = self.client.get(self.base_url + "/openapi.json")
+        r.raise_for_status()
+        return r.json()
+
     # -- step 2: top-up challenge ------------------------------------------
     def topup_challenge(self) -> tuple[PaymentRequired, str, bytes]:
         """POST /v1/x402/topup with no payment -> 402 + PAYMENT-REQUIRED.
@@ -304,25 +483,28 @@ class ClarityAgent:
         self,
         model: str = "local:qwen3:1.7b",
         messages: list[dict] | None = None,
+        path: str | None = None,
     ) -> tuple[PaymentRequired, str, bytes]:
-        """POST /v1/x402/chat/completions with no payment -> 402 + PAYMENT-REQUIRED.
+        """POST <direct chat route> with no payment -> 402 + PAYMENT-REQUIRED.
 
-        This is the DIRECT paid-inference challenge (resource
-        /v1/x402/chat/completions). It does NOT create a gateway key, credit
+        `path` is the route discovered from OpenAPI metadata (defaults to
+        DIRECT_CHAT_ROUTE only as a unit-test convenience). This is the DIRECT
+        paid-inference challenge; it does NOT create a gateway key, credit
         balance, or require a prior top-up. Returns the parsed requirement, the
         raw header value, and the raw (empty) body.
         """
+        path = path or DIRECT_CHAT_ROUTE
         body = {
             "model": model,
             "messages": messages
             or [{"role": "user", "content": "Hello from the Clarity agent SDK example."}],
         }
-        status, _data, headers = self._post("/v1/x402/chat/completions", {}, body)
+        status, _data, headers = self._post(path, {}, body)
         raw = headers.get("PAYMENT-REQUIRED")
         if status == 402 and raw:
             return PaymentRequired.from_header(raw), raw, b""
         raise RuntimeError(
-            f"/v1/x402/chat/completions did not return 402 + PAYMENT-REQUIRED "
+            f"{path} did not return 402 + PAYMENT-REQUIRED "
             f"(status={status}, has_header={bool(raw)})"
         )
 
@@ -462,9 +644,11 @@ class ClarityAgent:
     ) -> dict:
         """Drive the DIRECT machine-payable inference flow (no top-up, no skey).
 
-        discover -> identify /v1/x402/chat/completions -> send an unpaid direct
-        request -> receive 402 -> parse the requirement -> (DRY-RUN) report the
-        exact required payment and STOP before signing.
+        Start from ONLY the public origin, fetch the machine-readable OpenAPI
+        discovery doc, identify the x402-paid routes, select the direct
+        chat/completion route, send an unpaid request, receive 402, parse the
+        requirement, and (DRY-RUN) report the exact payment and STOP before
+        signing. No route path is supplied manually.
         """
         messages = messages or [
             {"role": "user", "content": "Hello from the Clarity agent SDK example."}
@@ -483,18 +667,27 @@ class ClarityAgent:
             "error": None,
         }
 
-        # 1. discover
+        # 1. machine-readable discovery from the public origin (no path assumed)
         try:
-            dstatus, ddata, _ = self.discover()
-            gw = ddata.get("status") if isinstance(ddata, dict) else None
-            result["discovery"] = {"status": dstatus, "gateway": gw}
+            spec = self.fetch_openapi()
+            paid = discover_paid_routes(spec)
+            route = select_direct_chat_route(paid)
+            result["discovery"] = {
+                "title": (spec.get("info") or {}).get("title"),
+                "paid_routes": [r["path"] for r in paid],
+                "selected_route": route["path"],
+                "selected_method": route["method"],
+                "selection_reason": route.get("selection_reason"),
+            }
         except Exception as e:  # noqa: BLE001
             result["error"] = f"discovery failed: {e!r}"
             return result
 
-        # 2. DIRECT chat challenge (no top-up required)
+        # 2. DIRECT chat challenge to the DISCOVERED route (no top-up required)
         try:
-            pr, pr_header, pr_body = self.chat_challenge(model=model, messages=messages)
+            pr, pr_header, pr_body = self.chat_challenge(
+                path=route["path"], model=model, messages=messages
+            )
         except Exception as e:  # noqa: BLE001
             result["error"] = f"direct chat challenge failed: {e!r}"
             return result
@@ -511,7 +704,7 @@ class ClarityAgent:
             result["dry_run_plan"] = self._dry_run_plan_direct(pr, payer_address)
             return result
 
-        # 4. LIVE: sign + retry the DIRECT chat route with PAYMENT-SIGNATURE
+        # 4. LIVE: sign + retry the DISCOVERED direct route with PAYMENT-SIGNATURE
         key = os.environ.get("X402_PAYER_KEY")
         if not key:
             raise RuntimeError(
@@ -536,7 +729,7 @@ class ClarityAgent:
 
         # 5. retry DIRECT chat with PAYMENT-SIGNATURE; completion returns directly
         cstatus, cdata, cheaders = self._post(
-            "/v1/x402/chat/completions", payment_headers, {"model": model, "messages": messages}
+            route["path"], payment_headers, {"model": model, "messages": messages}
         )
         try:
             proc = await http_client.process_payment_result(

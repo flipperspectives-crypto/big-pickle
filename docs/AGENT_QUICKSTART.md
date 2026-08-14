@@ -29,9 +29,14 @@ requirement) whose `resource` field names the route you called.
 
 ### Option A — DIRECT paid inference (preferred, one-shot)
 
-No signup, no `skey`, no second request.
+No signup, no `skey`, no second request. An autonomous agent starts from **only
+the public origin** and discovers this route itself.
 
-1. `GET /v1/status` — discover the gateway contract (public, no auth).
+1. `GET /openapi.json` — fetch Clarity's machine-readable API metadata (public,
+   no auth). It advertises the x402-paid resources with `x-payment-info` and
+   descriptions. The agent selects the direct chat/completion route (POST, same
+   origin, x402-paid, described as direct inference — **not** gateway credit /
+   top-up / `skey`); it does not require the route path to be supplied manually.
 2. `POST /v1/x402/chat/completions` **without payment** — an OpenAI-style body
    (`model`, `messages`, optional `max_tokens` ≤ 128, `stream` must be false).
    The endpoint answers `HTTP 402` with a `PAYMENT-REQUIRED` header whose

@@ -6,11 +6,13 @@ production lifecycle. Clarity exposes **two** machine-payable x402 v2 resources:
 - `POST /v1/x402/chat/completions` (DIRECT, preferred, one-shot paid inference)
 - `POST /v1/x402/topup` (persistent gateway credit → `skey`)
 
-DIRECT flow:
+DIRECT flow (origin-only discovery):
 
-**discovery → `POST /v1/x402/chat/completions` 402/PAYMENT-REQUIRED (resource
-`/v1/x402/chat/completions`) → (dry-run plan OR live x402 sign+retry) → 200
-carries the completion directly (no `skey`, no gateway balance).**
+**`GET /openapi.json` → identify x402-paid routes → select the direct
+chat/completion route (no path supplied manually) → `POST <discovered-route>`
+402/PAYMENT-REQUIRED (resource = that route) → (dry-run plan OR live x402
+sign+retry) → 200 carries the completion directly (no `skey`, no gateway
+balance).**
 
 Top-up flow:
 
@@ -47,12 +49,22 @@ test_agent.py::test_dry_run_shows_simulated_plan_and_no_skey PASSED
 test_agent.py::test_no_secrets_in_dry_run_output PASSED
 test_agent.py::test_self_contained_demo_runs_offline PASSED
 test_agent.py::test_demo_direct_runs_offline PASSED
+test_agent.py::test_discover_from_origin_only_begins_with_base_url PASSED
+test_agent.py::test_openapi_discovery_is_fetched PASSED
+test_agent.py::test_direct_chat_route_found_from_metadata PASSED
+test_agent.py::test_route_selected_over_topup_for_chat PASSED
+test_agent.py::test_route_method_path_derived_from_discovery_not_supplied PASSED
+test_agent.py::test_malformed_discovery_fails_safely PASSED
+test_agent.py::test_no_matching_paid_inference_route_fails_safely PASSED
+test_agent.py::test_unrelated_paid_route_not_selected PASSED
+test_agent.py::test_cross_origin_route_metadata_rejected PASSED
+test_agent.py::test_direct_flow_sends_no_payment_signature_discovery PASSED
 test_agent.py::test_live_requires_env_key PASSED
 test_agent.py::test_live_two_endpoint_flow_mocked PASSED
 test_agent.py::test_live_sdk_integration_offline PASSED
 test_agent.py::test_agent_quickstart_no_longer_claims_single_challenge PASSED
 
-17 passed
+27 passed
 ```
 
 ### What each test proves
@@ -86,6 +98,28 @@ test_agent.py::test_agent_quickstart_no_longer_claims_single_challenge PASSED
   with an embedded offline server.
 - `test_demo_direct_runs_offline` — the dry-run `demo_direct()` runs end-to-end
   with an embedded offline server and references `/v1/x402/chat/completions`.
+- `test_discover_from_origin_only_begins_with_base_url` — `run_direct()` takes no
+  route path; starting from the origin only it fetches OpenAPI, selects
+  `/v1/x402/chat/completions`, and stops before signing.
+- `test_openapi_discovery_is_fetched` — the agent issues `GET /openapi.json`
+  during discovery.
+- `test_direct_chat_route_found_from_metadata` — `discover_paid_routes` extracts
+  both x402-paid routes from the OpenAPI doc.
+- `test_route_selected_over_topup_for_chat` — `select_direct_chat_route` prefers
+  the chat route over the credit/top-up route for a chat task.
+- `test_route_method_path_derived_from_discovery_not_supplied` — when the
+  OpenAPI advertises the direct route under a different relative path, the agent
+  POSTs to that discovered path (not the hard-coded constant).
+- `test_malformed_discovery_fails_safely` — an OpenAPI doc with no paid routes
+  makes selection raise `RuntimeError`.
+- `test_no_matching_paid_inference_route_fails_safely` — an OpenAPI advertising
+  only the top-up route yields a safe failure (no direct inference route).
+- `test_unrelated_paid_route_not_selected` — a paid non-inference route (weather)
+  is not selected; the agent fails safely.
+- `test_cross_origin_route_metadata_rejected` — a paid route whose path is an
+  absolute URL is rejected as cross-origin.
+- `test_direct_flow_sends_no_payment_signature_discovery` — the discovery-driven
+  direct flow sends no `PAYMENT-SIGNATURE` and no top-up.
 - `test_live_requires_env_key` — LIVE raises `RuntimeError` unless `X402_PAYER_KEY`
   is set (no signing, no spend without the key).
 - `test_live_two_endpoint_flow_mocked` — full two-endpoint LIVE flow
@@ -145,7 +179,28 @@ The `PAYMENT-SIGNATURE` value is prefixed `SIMULATED.` and decodes to
 "0xAGENT_PUBLIC_ADDRESS_DEMO", "note": "no real signing occurred"}` — explicitly
 **not** a settleable signature.
 
-## 3. Honesty labels
+## 3. Discovery algorithm (origin-only)
+
+`ClarityAgent.run_direct()` performs, in order:
+
+1. `GET {origin}/openapi.json` — the gateway's curated, public OpenAPI.
+2. `discover_paid_routes(spec)` — keep POST operations that carry an
+   `x-payment-info` block (price + `x402` protocol). Each becomes a normalized
+   route dict (path, method, operation_id, summary, description, payment).
+3. `select_direct_chat_route(routes)` validates every candidate:
+   - method must be `POST`;
+   - path must be a same-origin relative path (starts with `/`) — absolute URLs
+     are rejected as cross-origin;
+   - payment metadata must be internally consistent (amount present, `x402` in
+     protocols);
+   - description/summary must indicate chat/completion (or bare inference) and
+     must **not** read as gateway credit / top-up / `skey`.
+   If no candidate qualifies it raises `RuntimeError` listing each rejection
+   reason. If several remain, the one explicitly naming chat/completion is
+   preferred. The chosen route's path/method are then used for the unpaid
+   request — **never supplied manually**.
+
+## 4. Honesty labels
 
 - The example output and README always mark dry-run vs live settlement.
 - LIVE is fully implemented but **gated** behind `dry_run=False` **and**
@@ -155,7 +210,7 @@ The `PAYMENT-SIGNATURE` value is prefixed `SIMULATED.` and decodes to
 - The DIRECT flow never creates a gateway key, credits balance, or requires a
   prior top-up — matching the gateway's settlement isolation.
 
-## 4. Files (no gateway production behavior changed in this pass)
+## 5. Files (no gateway production behavior changed in this pass)
 
 ```
 examples/agent-sdk-example/clarity_agent.py

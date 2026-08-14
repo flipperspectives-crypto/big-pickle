@@ -25,6 +25,10 @@ from clarity_agent import (  # noqa: E402
     discover_clarity,
     demo,
     demo_direct,
+    fetch_openapi,
+    discover_paid_routes,
+    select_direct_chat_route,
+    DIRECT_CHAT_ROUTE,
 )
 
 # A realistic x402 v2 PAYMENT-REQUIRED header (mirrors what /v1/x402/topup sends).
@@ -82,7 +86,50 @@ SECRET_SUBSTRINGS = [
 ]
 
 
-def _make_transport(calls=None):
+# Default curated OpenAPI the gateway serves at /openapi.json (two x402-paid
+# routes). Tests may pass a custom `openapi_doc` to exercise selection edges.
+_DEFAULT_OPENAPI = {
+    "openapi": "3.1.0",
+    "info": {"title": "Clarity Agent API", "version": "0.1.0"},
+    "paths": {
+        "/v1/x402/topup": {
+            "post": {
+                "operationId": "purchaseClarityInferenceCredit",
+                "summary": "Purchase Clarity AI inference credit",
+                "description": (
+                    "Machine-payable top-up. After successful settlement the caller "
+                    "receives gateway credit plus a secret skey for /v1/chat/completions."
+                ),
+                "x-payment-info": {
+                    "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+                    "protocols": [{"x402": {}}],
+                },
+                "responses": {"402": {"description": "Payment Required"}},
+            }
+        },
+        "/v1/x402/chat/completions": {
+            "post": {
+                "operationId": "purchaseClarityChatCompletion",
+                "summary": "Buy a Clarity AI chat completion",
+                "description": (
+                    "Direct pay-per-request AI inference through Clarity using "
+                    "local:qwen3:1.7b. Receive an OpenAI-compatible chat completion "
+                    "directly. No Clarity API key is required."
+                ),
+                "x-payment-info": {
+                    "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+                    "protocols": [{"x402": {}}],
+                },
+                "responses": {"402": {"description": "Payment Required"}},
+            }
+        },
+    },
+}
+
+
+def _make_transport(calls=None, openapi_doc=None):
+    doc = openapi_doc if openapi_doc is not None else _DEFAULT_OPENAPI
+
     def handler(request: httpx.Request) -> httpx.Response:
         if calls is not None:
             calls.append((request.method, request.url.path, dict(request.headers)))
@@ -95,6 +142,8 @@ def _make_transport(calls=None):
                     "gateway": {"active_keys": 1, "total_balance_usd": 0.5},
                 },
             )
+        if request.method == "GET" and path == "/openapi.json":
+            return httpx.Response(200, json=doc)
         if request.method == "POST" and path == "/v1/x402/topup":
             # Unpaid request -> 402 + PAYMENT-REQUIRED (the only x402 challenge).
             if "PAYMENT-SIGNATURE" not in request.headers:
@@ -226,6 +275,152 @@ def test_agent_direct_flow_dry_run_stops_before_signing(fake_server):
     decoded = json.loads(base64.b64decode(sig.split(".", 1)[1]))
     assert decoded["simulated"] is True
     assert decoded["resource"] == "/v1/x402/chat/completions"
+
+
+# ---------------------------------------------------------------------------
+# Origin-only discovery (no route path supplied manually)
+# ---------------------------------------------------------------------------
+def test_discover_from_origin_only_begins_with_base_url():
+    calls = []
+    transport = _make_transport(calls)
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    # run_direct takes NO path argument — it starts from the origin only.
+    result = asyncio.run(agent.run_direct())
+    assert result["mode"] == "dry-run"
+    assert result["discovery"]["title"] == "Clarity Agent API"
+    assert result["discovery"]["selected_route"] == "/v1/x402/chat/completions"
+    assert result["discovery"]["selected_method"] == "POST"
+    assert "selection_reason" in result["discovery"]
+    assert result["payment_required"]["resource"] == "/v1/x402/chat/completions"
+    # dry-run STOP before signing.
+    assert result["payment_signed"] is False
+
+
+def test_openapi_discovery_is_fetched():
+    calls = []
+    transport = _make_transport(calls)
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    asyncio.run(agent.run_direct())
+    disc = [c for c in calls if c[1] == "/openapi.json"]
+    assert disc, "agent must fetch /openapi.json for discovery"
+    assert disc[0][0] == "GET"
+
+
+def test_direct_chat_route_found_from_metadata():
+    paid = discover_paid_routes(_DEFAULT_OPENAPI)
+    paths = [r["path"] for r in paid]
+    assert "/v1/x402/chat/completions" in paths
+    assert "/v1/x402/topup" in paths
+
+
+def test_route_selected_over_topup_for_chat():
+    paid = discover_paid_routes(_DEFAULT_OPENAPI)
+    chosen = select_direct_chat_route(paid)
+    assert chosen["path"] == "/v1/x402/chat/completions"
+    assert chosen["path"] != "/v1/x402/topup"
+    assert "chat" in (chosen["summary"]).lower()
+
+
+def test_route_method_path_derived_from_discovery_not_supplied():
+    # Prove the agent follows the discovered path (not a hard-coded constant):
+    # serve the chat route under a custom relative path in the OpenAPI doc and
+    # a matching transport handler; the agent must POST to that discovered path.
+    custom_doc = json.loads(json.dumps(_DEFAULT_OPENAPI))
+    custom_doc["paths"]["/v1/x402/inference-now"] = custom_doc["paths"].pop(
+        "/v1/x402/chat/completions"
+    )
+
+    def handler(request):
+        if request.method == "GET" and request.url.path == "/openapi.json":
+            return httpx.Response(200, json=custom_doc)
+        if request.method == "POST" and request.url.path == "/v1/x402/inference-now":
+            return httpx.Response(
+                402, headers={"PAYMENT-REQUIRED": FAKE_CHAT_PR_HEADER}, json={}
+            )
+        return httpx.Response(404)
+
+    calls = []
+    transport = httpx.MockTransport(
+        lambda req: _record_and_dispatch(req, calls, handler)
+    )
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    result = asyncio.run(agent.run_direct())
+    assert result["discovery"]["selected_route"] == "/v1/x402/inference-now"
+    chat_calls = [c for c in calls if c[1] == "/v1/x402/inference-now"]
+    assert chat_calls, "agent must POST to the discovered path"
+    assert chat_calls[0][1] != DIRECT_CHAT_ROUTE  # proves it followed metadata
+
+
+def _record_and_dispatch(request, calls, handler):
+    calls.append((request.method, request.url.path, dict(request.headers)))
+    return handler(request)
+
+
+def test_malformed_discovery_fails_safely():
+    agent = ClarityAgent(dry_run=True)
+    with pytest.raises(RuntimeError):
+        select_direct_chat_route(discover_paid_routes({"paths": {}}))
+
+
+def test_no_matching_paid_inference_route_fails_safely():
+    # OpenAPI advertises ONLY the top-up route -> no direct inference candidate.
+    only_topup = {"paths": {k: v for k, v in _DEFAULT_OPENAPI["paths"].items() if k == "/v1/x402/topup"}}
+    calls = []
+    transport = _make_transport(calls, openapi_doc=only_topup)
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    result = asyncio.run(agent.run_direct())
+    assert result["error"] is not None
+    assert "No suitable direct paid inference route" in result["error"]
+
+
+def test_unrelated_paid_route_not_selected():
+    weather = {
+        "openapi": "3.1.0",
+        "info": {"title": "Clarity Agent API"},
+        "paths": {
+            "/v1/x402/weather": {
+                "post": {
+                    "operationId": "purchaseWeather",
+                    "summary": "Buy weather data",
+                    "description": "Machine-payable weather forecast.",
+                    "x-payment-info": {
+                        "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+                        "protocols": [{"x402": {}}],
+                    },
+                    "responses": {"402": {"description": "Payment Required"}},
+                }
+            }
+        },
+    }
+    calls = []
+    transport = _make_transport(calls, openapi_doc=weather)
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    result = asyncio.run(agent.run_direct())
+    assert result["error"] is not None
+    assert "No suitable direct paid inference route" in result["error"]
+
+
+def test_cross_origin_route_metadata_rejected():
+    cross = json.loads(json.dumps(_DEFAULT_OPENAPI))
+    cross["paths"]["https://evil.example/x402/chat/completions"] = cross["paths"].pop(
+        "/v1/x402/chat/completions"
+    )
+    paid = discover_paid_routes(cross)
+    with pytest.raises(RuntimeError):
+        select_direct_chat_route(paid)
+
+
+def test_direct_flow_sends_no_payment_signature_discovery():
+    calls = []
+    transport = _make_transport(calls)
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    asyncio.run(agent.run_direct())
+    # No top-up, and no PAYMENT-SIGNATURE is ever sent.
+    assert not [c for c in calls if c[1] == "/v1/x402/topup"]
+    assert not [c for c in calls if "PAYMENT-SIGNATURE" in (c[2] or {})]
+    chat_calls = [c for c in calls if c[1] == "/v1/x402/chat/completions"]
+    assert len(chat_calls) == 1
+    assert "PAYMENT-SIGNATURE" not in (chat_calls[0][2] or {})
 
 
 def test_direct_flow_sends_no_payment_signature_and_no_topup():

@@ -9,17 +9,28 @@ Clarity machine-payable lifecycle. Clarity exposes **two** x402 v2 resources:
 - `POST /v1/x402/topup` — persistent gateway credit that returns an `skey` for
   `POST /v1/chat/completions`.
 
-### DIRECT flow (preferred)
+### DIRECT flow (preferred) — origin-only discovery
 
-1. **Discover** the gateway contract via `GET /v1/status` (public, no auth).
-2. **Request a completion** with `POST /v1/x402/chat/completions` and **no**
-   payment. The protected endpoint answers `402` + a `PAYMENT-REQUIRED` header
-   (base64 JSON x402 v2 requirement) whose `resource` is
-   `/v1/x402/chat/completions`.
-3. **DRY-RUN** (default, no funds): display the requirement (network, asset,
+The agent starts from **only the public origin** and discovers the direct route
+itself; the route path is never supplied manually.
+
+1. **Discover machine-readable API metadata** via `GET /openapi.json` (public,
+   no auth). The gateway's curated OpenAPI advertises exactly the x402-paid
+   resources, each with an `x-payment-info` block (price + protocol) and a
+   description.
+2. **Identify the x402-paid routes** (`discover_paid_routes`) — POST operations
+   carrying `x-payment-info`.
+3. **Select the direct chat/completion route** (`select_direct_chat_route`) —
+   validated as POST, same-origin, x402-paid, and described as direct
+   chat/completion inference (not gateway credit / top-up / skey). The selection
+   records *why* that route was chosen; if none qualifies it fails safely.
+4. **Request a completion** with `POST <discovered-route>` and **no** payment.
+   The protected endpoint answers `402` + a `PAYMENT-REQUIRED` header (base64
+   JSON x402 v2 requirement) whose `resource` is the discovered route.
+5. **DRY-RUN** (default, no funds): display the requirement (network, asset,
    amount, payTo, resource) and a *simulated* signing plan. STOP before signing.
-4. **LIVE** (opt-in, requires `X402_PAYER_KEY`): use the official **`x402` client
-   SDK** to sign the payment and retry `/v1/x402/chat/completions` with the
+6. **LIVE** (opt-in, requires `X402_PAYER_KEY`): use the official **`x402` client
+   SDK** to sign the payment and retry the discovered route with the
    `PAYMENT-SIGNATURE` header. The `200` carries the completion directly.
 
 `ClarityAgent.run_direct()` drives this flow; `demo_direct()` runs it offline.
@@ -47,7 +58,8 @@ Clarity machine-payable lifecycle. Clarity exposes **two** x402 v2 resources:
 
 | Stage | Endpoint | Meaning |
 |-------|----------|---------|
-| Discovery | `GET /v1/status` | Public reliability/contract surface. |
+| Discovery | `GET /openapi.json` | Machine-readable API metadata (paths, methods, `x-payment-info`). |
+| Route selection | (from metadata) | Prefer the direct chat/completion route; reject top-up/credit and cross-origin. |
 | Direct challenge | `POST /v1/x402/chat/completions` (no payment) | `402` + `PAYMENT-REQUIRED` (`resource` = that route). |
 | Direct settlement | `POST /v1/x402/chat/completions` (`PAYMENT-SIGNATURE`) | Real x402 payment; returns completion directly. |
 | Top-up challenge | `POST /v1/x402/topup` (no payment) | `402` + `PAYMENT-REQUIRED`. |
