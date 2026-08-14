@@ -34,6 +34,12 @@ from x402.http import HTTPFacilitatorClient, FacilitatorConfig
 from x402.http.facilitator_client_base import CreateHeadersAuthProvider
 from x402.http.middleware.fastapi import payment_middleware
 from x402.http.types import PaymentOption, RouteConfig
+from x402.extensions.bazaar import (
+    declare_discovery_extension,
+    bazaar_resource_server_extension,
+    OutputConfig,
+    BAZAAR,
+)
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
 from .config import settings
@@ -137,12 +143,35 @@ def build_topup_route() -> RouteConfig:
         max_timeout_seconds=60,
         extra={"assetTransferMethod": "eip3009"},
     )
+    # Bazaar v2 discovery metadata so autonomous buyers can understand and
+    # catalog this paid endpoint after a successful external CDP settlement.
+    # The HTTP method is injected by bazaar_resource_server_extension at request
+    # time from the live request context (see build_x402_middleware); we also
+    # pre-populate it so the static declaration is schema-valid (the discovery
+    # body schema requires `method`) and the build-time warning is silenced.
+    bazaar_extension = declare_discovery_extension(
+        input={},
+        input_schema={"type": "object", "properties": {}},
+        body_type="json",
+        output=OutputConfig(
+            example={
+                "id": "example-key-id",
+                "skey": "gw_example_redacted",
+                "balance_usd": 0.001,
+                "credited_usd": 0.001,
+                "network": settings.X402_CHAIN_ID,
+                "scheme": "exact",
+            }
+        ),
+    )
+    bazaar_extension[BAZAAR.key]["info"]["input"]["method"] = "POST"
     return RouteConfig(
         accepts=option,
         resource="/v1/x402/topup",
         description="Clarity gateway credit top-up (machine-payable via x402)",
         mime_type="application/json",
         service_name="Clarity",
+        extensions=bazaar_extension,
     )
 
 
@@ -237,6 +266,9 @@ def build_x402_middleware(
     if server is None:
         server = x402ResourceServer(facilitator_client)
         server.register(settings.X402_CHAIN_ID, ExactEvmServerScheme())
+    # Register the Bazaar resource-server extension so the discovery declaration
+    # is enriched with the live HTTP method (POST) for facilitator cataloging.
+    server.register_extension(bazaar_resource_server_extension)
     server.on_after_settle(_after_settle)
     routes = {"/v1/x402/topup": build_topup_route()}
     return payment_middleware(

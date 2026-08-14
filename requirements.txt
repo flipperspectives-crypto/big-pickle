@@ -3,6 +3,11 @@ uvicorn[standard]>=0.30
 httpx>=0.27
 stripe>=9.0
 x402[fastapi,evm]
+# Bazaar v2 discovery metadata (declare_discovery_extension /
+# bazaar_resource_server_extension) requires jsonschema for extension
+# validation and schema building. Needed so app.x402 can attach discovery to
+# POST /v1/x402/topup without a hand-written schema.
+jsonschema>=4.0
 # Base mainnet (X402_NETWORK_MODE=mainnet) CDP facilitator JWT auth uses the
 # official CDP SDK generator (cdp.auth.utils.jwt.generate_jwt). Imported lazily
 # inside the mainnet auth path only; not needed for testnet.

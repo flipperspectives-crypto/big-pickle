@@ -24,8 +24,11 @@ The agent verifies each stage independently:
 A later stage is NEVER marked True unless the earlier one actually succeeded.
 
 Security:
-  - No real funds move in DRY-RUN. LIVE spends only when you supply a real
-    funded Base Sepolia key via X402_PAYER_KEY and explicitly opt in.
+    - No real funds move in DRY-RUN. LIVE spends only when you supply a real
+      funded wallet via X402_PAYER_KEY and explicitly opt in. The agent pays
+      whatever network/asset/amount the live PAYMENT-REQUIRED challenge
+      advertises (eip155:8453 for mainnet, eip155:84532 for testnet) — it never
+      hardcodes a network.
   - The private key is read from the environment, used only to build the
     signer, then immediately discarded (key = None).
   - The key value is never printed, logged, persisted, committed, or returned.
@@ -290,7 +293,9 @@ class ClarityAgent:
         if not key:
             raise RuntimeError(
                 "LIVE mode requires the X402_PAYER_KEY environment variable "
-                "(a funded Base Sepolia wallet private key). Refusing to run."
+                "(a funded wallet private key for the network advertised by the "
+                "live PAYMENT-REQUIRED challenge — eip155:8453 for mainnet, "
+                "eip155:84532 for testnet). Refusing to run."
             )
         http_client, _address = self._build_client(key, pr.network)
         key = None  # scrub the private-key reference immediately after use
