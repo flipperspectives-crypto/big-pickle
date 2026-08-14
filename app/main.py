@@ -591,3 +591,133 @@ def _verify_stripe_sig(secret: str, payload: str, signature: str) -> bool:
         return hmac.compare_digest(computed, expected)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Intentional x402scan agent-discovery contract.
+#
+# The runtime router above keeps every Clarity endpoint working normally. The
+# public OpenAPI document below is a CURATED discovery surface: it advertises
+# ONLY the machine-payable agent resource (POST /v1/x402/topup) so external
+# x402 scanners catalog the real payable endpoint instead of probing unrelated
+# routes and mis-flagging them as failed discovery resources. This changes
+# public discovery METADATA only -- no runtime route, auth, or behavior is
+# altered, and nothing is deployed or restarted here.
+# ---------------------------------------------------------------------------
+
+_X402SCAN_GUIDANCE = (
+    "Clarity provides pay-per-use AI inference. First call POST /v1/x402/topup "
+    "with an empty JSON object. An unpaid request returns an x402 v2 402 payment "
+    "challenge. Pay exactly the network, asset and amount advertised by that live "
+    "challenge. After successful settlement the response returns a gateway skey. "
+    "Keep that skey secret and use it as Authorization: Bearer <skey> when calling "
+    "POST /v1/chat/completions."
+)
+
+_TOPUP_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": [
+        "id",
+        "skey",
+        "balance_usd",
+        "credited_usd",
+        "network",
+        "scheme",
+        "asset",
+        "payer",
+        "message",
+    ],
+    "properties": {
+        "id": {"type": "string"},
+        "skey": {"type": "string"},
+        "balance_usd": {"type": "number"},
+        "credited_usd": {"type": "number"},
+        "network": {"type": "string"},
+        "scheme": {"type": "string"},
+        "asset": {"type": "string"},
+        "payer": {"type": "string"},
+        "message": {"type": "string"},
+    },
+    # Clearly fake/redacted example: no real skey, private key, CDP credential,
+    # PAYMENT-SIGNATURE, or bearer token.
+    "example": {
+        "id": "example-key-id",
+        "skey": "gw_example_redacted",
+        "balance_usd": 0.001,
+        "credited_usd": 0.001,
+        "network": "eip155:8453",
+        "scheme": "exact",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "payer": "0x1111111111111111111111111111111111111111",
+        "message": "Key funded after successful settlement.",
+    },
+}
+
+
+def discovery_openapi() -> dict:
+    """Curated OpenAPI used for agent/x402scan discovery.
+
+    Exposes ONLY POST /v1/x402/topup as a machine-payable resource. Decimal USD
+    price metadata is discovery-only; the actual runtime charge remains the x402
+    atomic amount advertised by the live 402 challenge.
+    """
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Clarity Agent API",
+            "version": app.version,
+            "contact": {"email": "onelovefuck@gmail.com"},
+            "x-guidance": _X402SCAN_GUIDANCE,
+        },
+        "paths": {
+            "/v1/x402/topup": {
+                "post": {
+                    "operationId": "purchaseClarityInferenceCredit",
+                    "summary": "Purchase Clarity AI inference credit",
+                    "description": (
+                        "Machine-payable top-up. The caller makes an x402 v2 "
+                        "payment and, after successful settlement, receives gateway "
+                        "credit plus a secret skey used to authenticate inference at "
+                        "POST /v1/chat/completions. Send an empty JSON object; an "
+                        "unpaid request returns a 402 payment challenge describing the "
+                        "exact network, asset, and amount to pay."
+                    ),
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "additionalProperties": False,
+                                },
+                                "example": {},
+                            }
+                        },
+                    },
+                    "x-payment-info": {
+                        "price": {
+                            "mode": "fixed",
+                            "currency": "USD",
+                            "amount": "0.001000",
+                        },
+                        "protocols": [{"x402": {}}],
+                    },
+                    "responses": {
+                        "402": {"description": "Payment Required"},
+                        "200": {
+                            "description": "Successful x402 settlement and Clarity gateway credit",
+                            "content": {
+                                "application/json": {
+                                    "schema": _TOPUP_OUTPUT_SCHEMA,
+                                }
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+
+app.openapi = discovery_openapi
