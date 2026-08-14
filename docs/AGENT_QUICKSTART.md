@@ -23,15 +23,35 @@ https://desktop-o99r0sf.tail935fba.ts.net
 
 ## Payment flow (x402)
 
+Clarity exposes **two** machine-payable x402 v2 resources. Both answer an
+unpaid request with `HTTP 402` + a `PAYMENT-REQUIRED` header (base64 JSON x402 v2
+requirement) whose `resource` field names the route you called.
+
+### Option A — DIRECT paid inference (preferred, one-shot)
+
+No signup, no `skey`, no second request.
+
 1. `GET /v1/status` — discover the gateway contract (public, no auth).
-2. `POST /v1/x402/topup` **without payment** — the endpoint answers
-   `HTTP 402` with a `PAYMENT-REQUIRED` header (base64 JSON x402 v2 payment
-   requirement). This is the only endpoint that issues an x402 challenge.
+2. `POST /v1/x402/chat/completions` **without payment** — an OpenAI-style body
+   (`model`, `messages`, optional `max_tokens` ≤ 128, `stream` must be false).
+   The endpoint answers `HTTP 402` with a `PAYMENT-REQUIRED` header whose
+   `resource` is `/v1/x402/chat/completions`.
 3. Read the `PAYMENT-REQUIRED` challenge. Sign it with an **x402-compatible Base
    Sepolia wallet** (client-side signing — see security rules below).
-4. Retry `POST /v1/x402/topup` with the `PAYMENT-SIGNATURE` header. On a
-   successful settlement the response carries a gateway **`skey`**.
-5. Call `POST /v1/chat/completions` with:
+4. Retry `POST /v1/x402/chat/completions` with the `PAYMENT-SIGNATURE` header.
+   On a successful settlement the `200` response carries the OpenAI-compatible
+   completion **directly**. No gateway balance is credited and no `skey` is issued.
+
+### Option B — persistent gateway credit (top-up + `skey`)
+
+Use this when you want reusable credit / a gateway key.
+
+1. `POST /v1/x402/topup` **without payment** — answers `HTTP 402` with a
+   `PAYMENT-REQUIRED` header whose `resource` is `/v1/x402/topup`.
+2. Read the challenge, sign it, and retry `POST /v1/x402/topup` with the
+   `PAYMENT-SIGNATURE` header. On a successful settlement the response carries a
+   gateway **`skey`**.
+3. Call `POST /v1/chat/completions` with:
    ```
    Authorization: Bearer <skey>
    ```

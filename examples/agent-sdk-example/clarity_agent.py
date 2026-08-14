@@ -1,25 +1,38 @@
 """Clarity Agent SDK example.
 
-Models the REAL production Clarity lifecycle (no made-up endpoints):
+Models the REAL production Clarity lifecycle (no made-up endpoints). Clarity now
+exposes TWO machine-payable x402 v2 resources:
+
+  * POST /v1/x402/chat/completions  (DIRECT, one-shot paid inference)
+  * POST /v1/x402/topup             (persistent gateway credit -> `skey`)
+
+DIRECT is the preferred/simplest flow for an autonomous agent:
 
   1. Discover the gateway contract via GET /v1/status (public, no auth).
-  2. Request a gateway credit by POSTing to /v1/x402/topup with NO payment.
-     The protected endpoint answers 402 + a `PAYMENT-REQUIRED` header
-     (a base64 JSON x402 v2 payment requirement). This is the ONLY endpoint
-     that issues an x402 challenge.
-  3. DRY-RUN (default, no funds): display the requirements and a SIMULATED
-     signing plan. No signature is produced and nothing is settled.
-  4. LIVE (opt-in, requires X402_PAYER_KEY): use the official `x402` client
-     SDK to sign the payment and retry /v1/x402/topup with the
-     `PAYMENT-SIGNATURE` header. On a successful settlement the response
-     carries a gateway `skey`.
-  5. Only then call /v1/chat/completions with `Authorization: Bearer <skey>`.
+  2. POST /v1/x402/chat/completions with an unpaid OpenAI-style body. The
+     protected endpoint answers 402 + a `PAYMENT-REQUIRED` header (base64 JSON
+     x402 v2 requirement) whose `resource` is /v1/x402/chat/completions.
+  3. DRY-RUN (default, no funds): parse and DISPLAY the requirement (network,
+     asset, amount, payTo, resource) and a SIMULATED signing plan. STOP before
+     signing — no signature is produced, nothing is settled, no top-up needed.
+  4. LIVE (opt-in, requires X402_PAYER_KEY): use the official `x402` client SDK
+     to sign the payment and retry /v1/x402/chat/completions with the
+     `PAYMENT-SIGNATURE` header. The 200 response carries the completion
+     directly — NO `skey`, NO second request, NO gateway balance involved.
+
+The top-up (persistent-credit) flow remains available:
+
+  1. POST /v1/x402/topup with NO payment -> 402 + `PAYMENT-REQUIRED`
+     (resource /v1/x402/topup).
+  2. LIVE: sign and retry /v1/x402/topup with `PAYMENT-SIGNATURE`; the 200
+     response carries a gateway `skey`.
+  3. Only then call /v1/chat/completions with `Authorization: Bearer <skey>`.
 
 The agent verifies each stage independently:
   - payment_signed           : the SDK produced a PAYMENT-SIGNATURE header
   - settlement_verified      : the gateway/facilitator confirmed settlement
-  - gateway_credit_verified  : the top-up returned a usable `skey`
-  - inference_verified       : /v1/chat/completions returned 200 with the skey
+  - gateway_credit_verified  : (top-up only) the top-up returned a usable `skey`
+  - inference_verified       : a completion endpoint returned 200
 
 A later stage is NEVER marked True unless the earlier one actually succeeded.
 
@@ -63,6 +76,31 @@ _DEMO_PR_HEADER = base64.b64encode(
     json.dumps(
         {
             "x402Version": 2,
+            "resource": {"url": "/v1/x402/topup"},
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:84532",
+                    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7E",
+                    "amount": "1000",
+                    "payTo": "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f",
+                    "maxTimeoutSeconds": 60,
+                    "extra": {"assetTransferMethod": "eip3009"},
+                }
+            ],
+        }
+    ).encode()
+).decode()
+
+
+# A realistic x402 v2 PAYMENT-REQUIRED header, mirroring what the production
+# /v1/x402/chat/completions (DIRECT paid inference) endpoint returns. Used only
+# by the offline demo transport. The resource identifies the direct route.
+_DEMO_CHAT_PR_HEADER = base64.b64encode(
+    json.dumps(
+        {
+            "x402Version": 2,
+            "resource": {"url": "/v1/x402/chat/completions"},
             "accepts": [
                 {
                     "scheme": "exact",
@@ -123,6 +161,36 @@ def _demo_transport() -> httpx.MockTransport:
                     },
                 )
             return httpx.Response(402, json={"error": "insufficient balance"})
+        if request.method == "POST" and path == "/v1/x402/chat/completions":
+            # DIRECT paid-inference challenge: unpaid -> 402 + PAYMENT-REQUIRED
+            # (resource /v1/x402/chat/completions). Paid retry -> completion, no skey.
+            if "PAYMENT-SIGNATURE" not in request.headers:
+                return httpx.Response(
+                    402, headers={"PAYMENT-REQUIRED": _DEMO_CHAT_PR_HEADER}, json={}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-demo",
+                    "object": "chat.completion",
+                    "model": "qwen3:1.7b",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "Hello from Clarity direct!",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                },
+            )
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
@@ -150,6 +218,13 @@ class PaymentRequired:
         if not accepts:
             raise ValueError("PAYMENT-REQUIRED header has no 'accepts' entry")
         a = accepts[0]
+        raw_resource = obj.get("resource")
+        # The official x402 SDK encodes `resource` as a ResourceInfo object
+        # ({"url": ...}); accept either that or a bare string for robustness.
+        if isinstance(raw_resource, dict):
+            resource = raw_resource.get("url")
+        else:
+            resource = raw_resource
         return cls(
             x402_version=obj.get("x402Version"),
             scheme=a.get("scheme"),
@@ -158,7 +233,7 @@ class PaymentRequired:
             amount=a.get("amount"),
             pay_to=a.get("payTo"),
             max_timeout_seconds=a.get("maxTimeoutSeconds"),
-            resource=obj.get("resource"),
+            resource=resource,
         )
 
 
@@ -221,6 +296,33 @@ class ClarityAgent:
             return PaymentRequired.from_header(raw), raw, b""
         raise RuntimeError(
             f"/v1/x402/topup did not return 402 + PAYMENT-REQUIRED "
+            f"(status={status}, has_header={bool(raw)})"
+        )
+
+    # -- step 2b: DIRECT chat challenge (preferred, no top-up) -------------
+    def chat_challenge(
+        self,
+        model: str = "local:qwen3:1.7b",
+        messages: list[dict] | None = None,
+    ) -> tuple[PaymentRequired, str, bytes]:
+        """POST /v1/x402/chat/completions with no payment -> 402 + PAYMENT-REQUIRED.
+
+        This is the DIRECT paid-inference challenge (resource
+        /v1/x402/chat/completions). It does NOT create a gateway key, credit
+        balance, or require a prior top-up. Returns the parsed requirement, the
+        raw header value, and the raw (empty) body.
+        """
+        body = {
+            "model": model,
+            "messages": messages
+            or [{"role": "user", "content": "Hello from the Clarity agent SDK example."}],
+        }
+        status, _data, headers = self._post("/v1/x402/chat/completions", {}, body)
+        raw = headers.get("PAYMENT-REQUIRED")
+        if status == 402 and raw:
+            return PaymentRequired.from_header(raw), raw, b""
+        raise RuntimeError(
+            f"/v1/x402/chat/completions did not return 402 + PAYMENT-REQUIRED "
             f"(status={status}, has_header={bool(raw)})"
         )
 
@@ -351,6 +453,111 @@ class ClarityAgent:
     def run_sync(self, **kwargs) -> dict:
         return asyncio.run(self.run(**kwargs))
 
+    # -- orchestration: DIRECT paid inference (preferred one-shot) ---------
+    async def run_direct(
+        self,
+        model: str = "local:qwen3:1.7b",
+        messages: list[dict] | None = None,
+        payer_address: str = "0xAGENT_PUBLIC_ADDRESS_DEMO",
+    ) -> dict:
+        """Drive the DIRECT machine-payable inference flow (no top-up, no skey).
+
+        discover -> identify /v1/x402/chat/completions -> send an unpaid direct
+        request -> receive 402 -> parse the requirement -> (DRY-RUN) report the
+        exact required payment and STOP before signing.
+        """
+        messages = messages or [
+            {"role": "user", "content": "Hello from the Clarity agent SDK example."}
+        ]
+        result: dict = {
+            "mode": "dry-run" if self.dry_run else "live",
+            "flow": "direct",
+            "base_url": self.base_url,
+            "discovery": None,
+            "payment_required": None,
+            "payment_signed": False,
+            "settlement_verified": False,
+            "gateway_credit_verified": False,
+            "inference_verified": False,
+            "chat_status": None,
+            "error": None,
+        }
+
+        # 1. discover
+        try:
+            dstatus, ddata, _ = self.discover()
+            gw = ddata.get("status") if isinstance(ddata, dict) else None
+            result["discovery"] = {"status": dstatus, "gateway": gw}
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"discovery failed: {e!r}"
+            return result
+
+        # 2. DIRECT chat challenge (no top-up required)
+        try:
+            pr, pr_header, pr_body = self.chat_challenge(model=model, messages=messages)
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"direct chat challenge failed: {e!r}"
+            return result
+        result["payment_required"] = {
+            "scheme": pr.scheme,
+            "network": pr.network,
+            "asset": pr.asset,
+            "amount": pr.amount,
+            "pay_to": pr.pay_to,
+            "resource": pr.resource,
+        }
+
+        if self.dry_run:
+            result["dry_run_plan"] = self._dry_run_plan_direct(pr, payer_address)
+            return result
+
+        # 4. LIVE: sign + retry the DIRECT chat route with PAYMENT-SIGNATURE
+        key = os.environ.get("X402_PAYER_KEY")
+        if not key:
+            raise RuntimeError(
+                "LIVE mode requires the X402_PAYER_KEY environment variable "
+                "(a funded wallet private key for the network advertised by the "
+                "live PAYMENT-REQUIRED challenge — eip155:8453 for mainnet, "
+                "eip155:84532 for testnet). Refusing to run."
+            )
+        http_client, _address = self._build_client(key, pr.network)
+        key = None  # scrub the private-key reference immediately after use
+
+        try:
+            payment_headers, payload = await http_client.handle_402_response(
+                {"PAYMENT-REQUIRED": pr_header}, pr_body
+            )
+        except Exception as e:  # noqa: BLE001
+            result["error"] = f"payment signing failed: {e!r}"
+            return result
+        result["payment_signed"] = bool(
+            payment_headers and "PAYMENT-SIGNATURE" in payment_headers
+        )
+
+        # 5. retry DIRECT chat with PAYMENT-SIGNATURE; completion returns directly
+        cstatus, cdata, cheaders = self._post(
+            "/v1/x402/chat/completions", payment_headers, {"model": model, "messages": messages}
+        )
+        try:
+            proc = await http_client.process_payment_result(
+                payload, lambda h: cheaders.get(h), cstatus
+            )
+            result["settlement_verified"] = bool(getattr(proc, "recovered", False))
+        except Exception:  # noqa: BLE001
+            result["settlement_verified"] = False
+
+        result["chat_status"] = cstatus
+        if cstatus == 200:
+            result["inference_verified"] = True
+            result["completion"] = cdata
+        else:
+            result["chat_error"] = cdata
+
+        return result
+
+    def run_direct_sync(self, **kwargs) -> dict:
+        return asyncio.run(self.run_direct(**kwargs))
+
     # -- DRY-RUN plan -------------------------------------------------------
     def _dry_run_plan(self, pr: PaymentRequired, payer_address: str) -> dict:
         simulated_sig = (
@@ -385,6 +592,40 @@ class ClarityAgent:
             "simulated_signature": simulated_sig,
         }
 
+    def _dry_run_plan_direct(self, pr: PaymentRequired, payer_address: str) -> dict:
+        simulated_sig = (
+            "SIMULATED."
+            + base64.b64encode(
+                json.dumps(
+                    {
+                        "simulated": True,
+                        "resource": pr.resource,
+                        "network": pr.network,
+                        "asset": pr.asset,
+                        "amount": pr.amount,
+                        "payTo": pr.pay_to,
+                        "payer": payer_address,
+                        "note": "no real signing occurred",
+                    }
+                ).encode()
+            ).decode()
+        )
+        return {
+            "note": (
+                "DRY RUN (DIRECT) - no funds moved and no valid signature produced. "
+                "Supply a real signer (X402_PAYER_KEY) to settle on-chain."
+            ),
+            "payer": payer_address,
+            "would_sign_with": "official x402 SDK ExactEvmScheme "
+            "(EIP-3009 transferWithAuthorization)",
+            "retry": "POST /v1/x402/chat/completions with PAYMENT-SIGNATURE header",
+            "on_success": (
+                "the 200 response carries the OpenAI-compatible completion directly; "
+                "no skey, no gateway balance, no second request"
+            ),
+            "simulated_signature": simulated_sig,
+        }
+
 
 def demo(base_url: str = DEFAULT_BASE_URL) -> dict:
     """Run the DRY-RUN lifecycle (no funds, no secrets).
@@ -396,6 +637,20 @@ def demo(base_url: str = DEFAULT_BASE_URL) -> dict:
     print("=== Clarity Agent SDK example (DRY RUN / NO FUNDS) ===")
     agent = ClarityAgent(base_url=base_url, dry_run=True, transport=_demo_transport())
     result = agent.run_sync()
+    print(json.dumps(result, indent=2))
+    return result
+
+
+def demo_direct(base_url: str = DEFAULT_BASE_URL) -> dict:
+    """Run the DIRECT paid-inference DRY-RUN lifecycle (no funds, no secrets).
+
+    Shows the preferred one-shot agent flow: discover -> identify
+    /v1/x402/chat/completions -> unpaid request -> 402 -> parsed requirement ->
+    report -> STOP before signing. No top-up and no skey are involved.
+    """
+    print("=== Clarity Agent SDK example — DIRECT paid inference (DRY RUN / NO FUNDS) ===")
+    agent = ClarityAgent(base_url=base_url, dry_run=True, transport=_demo_transport())
+    result = agent.run_direct_sync()
     print(json.dumps(result, indent=2))
     return result
 
@@ -451,6 +706,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Settle a real x402 payment (requires X402_PAYER_KEY).",
     )
+    parser.add_argument(
+        "--direct",
+        action="store_true",
+        help="Run the DIRECT paid-inference dry-run demo (POST /v1/x402/chat/completions).",
+    )
     args = parser.parse_args()
 
     base_url = args.base_url
@@ -465,6 +725,10 @@ if __name__ == "__main__":
             base_url=base_url, dry_run=False, timeout_seconds=args.timeout_seconds
         )
         result = agent.run_sync(model=args.model)
+    elif args.direct:
+        # Offline DIRECT dry-run demo: embedded mock transport; no network, funds,
+        # or secrets. base_url/timeout are ignored in this mode.
+        result = demo_direct(base_url=base_url)
     else:
         # Offline DRY-RUN demo: embedded mock transport; no network, funds, or
         # secrets. base_url/timeout are ignored in this mode.

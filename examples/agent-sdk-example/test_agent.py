@@ -24,6 +24,7 @@ from clarity_agent import (  # noqa: E402
     PaymentRequired,
     discover_clarity,
     demo,
+    demo_direct,
 )
 
 # A realistic x402 v2 PAYMENT-REQUIRED header (mirrors what /v1/x402/topup sends).
@@ -31,6 +32,30 @@ FAKE_PR_HEADER = base64.b64encode(
     json.dumps(
         {
             "x402Version": 2,
+            "resource": {"url": "/v1/x402/topup"},
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:84532",
+                    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7E",
+                    "amount": "1000",
+                    "payTo": "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f",
+                    "maxTimeoutSeconds": 60,
+                    "extra": {"assetTransferMethod": "eip3009"},
+                }
+            ],
+        }
+    ).encode()
+).decode()
+
+
+# Mirrors what /v1/x402/chat/completions (DIRECT paid inference) sends. The
+# resource identifies the direct route and distinguishes it from top-up.
+FAKE_CHAT_PR_HEADER = base64.b64encode(
+    json.dumps(
+        {
+            "x402Version": 2,
+            "resource": {"url": "/v1/x402/chat/completions"},
             "accepts": [
                 {
                     "scheme": "exact",
@@ -88,6 +113,23 @@ def _make_transport(calls=None):
                 )
             # Insufficient-balance 402: NO PAYMENT-REQUIRED header (not an x402 challenge).
             return httpx.Response(402, json={"error": "insufficient balance"})
+        if request.method == "POST" and path == "/v1/x402/chat/completions":
+            # DIRECT paid-inference challenge: unpaid -> 402 + PAYMENT-REQUIRED
+            # (resource /v1/x402/chat/completions). Paid retry -> completion, no skey.
+            if "PAYMENT-SIGNATURE" not in request.headers:
+                return httpx.Response(
+                    402, headers={"PAYMENT-REQUIRED": FAKE_CHAT_PR_HEADER}, json={}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "hi direct"}}
+                    ],
+                },
+            )
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
@@ -143,6 +185,75 @@ def test_chat_insufficient_balance_returns_plain_402_no_challenge(fake_server):
     status, data, headers = agent._post("/v1/chat/completions", {}, {})
     assert status == 402
     assert "PAYMENT-REQUIRED" not in headers  # chat 402 is NOT an x402 challenge
+
+
+# ---------------------------------------------------------------------------
+# DIRECT paid-inference route (/v1/x402/chat/completions)
+# ---------------------------------------------------------------------------
+def test_chat_direct_challenge_returns_402_with_payment_required(fake_server):
+    agent = ClarityAgent()
+    pr, raw, body = agent.chat_challenge()
+    assert pr.scheme == "exact"
+    assert pr.network == "eip155:84532"
+    assert raw == FAKE_CHAT_PR_HEADER
+
+
+def test_direct_chat_402_parses_resource_and_fields(fake_server):
+    agent = ClarityAgent()
+    pr, _raw, _body = agent.chat_challenge()
+    # The agent can identify network, asset, amount, payTo AND resource.
+    assert pr.resource == "/v1/x402/chat/completions"
+    assert pr.network == "eip155:84532"
+    assert pr.asset == "0x036CbD53842c5426634e7929541eC2318f3dCF7E"
+    assert pr.amount == "1000"
+    assert pr.pay_to == "0x42ad8e4c4f2fe41ee2730d2e3b2970fe4f50ae8f"
+
+
+def test_agent_direct_flow_dry_run_stops_before_signing(fake_server):
+    agent = ClarityAgent(dry_run=True)
+    result = asyncio.run(agent.run_direct())
+    assert result["mode"] == "dry-run"
+    assert result["flow"] == "direct"
+    assert result["payment_required"]["resource"] == "/v1/x402/chat/completions"
+    assert "dry_run_plan" in result
+    # DRY-RUN must never sign or settle.
+    assert result["payment_signed"] is False
+    assert result["settlement_verified"] is False
+    assert result["inference_verified"] is False
+    assert result["gateway_credit_verified"] is False
+    sig = result["dry_run_plan"]["simulated_signature"]
+    assert sig.startswith("SIMULATED.")
+    decoded = json.loads(base64.b64decode(sig.split(".", 1)[1]))
+    assert decoded["simulated"] is True
+    assert decoded["resource"] == "/v1/x402/chat/completions"
+
+
+def test_direct_flow_sends_no_payment_signature_and_no_topup():
+    calls = []
+    transport = _make_transport(calls)
+
+    agent = ClarityAgent(dry_run=True, transport=transport)
+    result = asyncio.run(agent.run_direct())
+
+    # No top-up was required before discovering/using the direct route.
+    topup_calls = [c for c in calls if c[1] == "/v1/x402/topup"]
+    assert not topup_calls, "direct flow must not call /v1/x402/topup"
+    # No PAYMENT-SIGNATURE was ever sent (no paid retry happened).
+    sig_calls = [c for c in calls if "PAYMENT-SIGNATURE" in (c[2] or {})]
+    assert not sig_calls, "dry-run must not send a PAYMENT-SIGNATURE header"
+    # Exactly one unpaid direct request was made.
+    chat_calls = [c for c in calls if c[1] == "/v1/x402/chat/completions"]
+    assert len(chat_calls) == 1
+    assert chat_calls[0][0] == "POST"
+    assert "PAYMENT-SIGNATURE" not in (chat_calls[0][2] or {})
+
+
+def test_demo_direct_runs_offline(fake_server, capsys):
+    demo_direct()
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out
+    assert "/v1/x402/chat/completions" in out
+    assert "SIMULATED" in out
 
 
 # ---------------------------------------------------------------------------
@@ -261,3 +372,21 @@ def test_live_sdk_integration_offline():
     decoded = json.loads(base64.b64decode(headers["PAYMENT-SIGNATURE"]))
     assert decoded["x402Version"] == 2
     assert decoded["payload"]["authorization"]["from"].lower() == acct.address.lower()
+
+
+# ---------------------------------------------------------------------------
+# Documentation alignment (stale statements removed)
+# ---------------------------------------------------------------------------
+def test_agent_quickstart_no_longer_claims_single_challenge():
+    quickstart = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "docs",
+        "AGENT_QUICKSTART.md",
+    )
+    with open(quickstart, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    # The stale claim that top-up is the ONLY x402-challenge endpoint is gone.
+    assert "only endpoint that issues an x402 challenge" not in text
+    # Both machine-payable resources are now documented.
+    assert "/v1/x402/topup" in text
+    assert "/v1/x402/chat/completions" in text
