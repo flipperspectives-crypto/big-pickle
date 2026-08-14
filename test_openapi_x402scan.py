@@ -155,10 +155,10 @@ def test_openapi_guidance_present():
     assert g and isinstance(g, str) and g.strip()
 
 
-# 5. paths contains exactly /v1/x402/topup.
-def test_openapi_paths_only_topup():
+# 5. paths contains exactly the two payable resources.
+def test_openapi_paths_only_two():
     _, o = _openapi()
-    assert list(o["paths"].keys()) == ["/v1/x402/topup"]
+    assert list(o["paths"].keys()) == ["/v1/x402/topup", "/v1/x402/chat/completions"]
 
 
 # 6. that path contains exactly the intended POST discovery operation.
@@ -166,6 +166,15 @@ def test_topup_post_operation_present():
     _, o = _openapi()
     post = o["paths"]["/v1/x402/topup"].get("post")
     assert post is not None
+
+
+# 6b. chat direct-pay path contains the intended POST discovery operation.
+def test_chat_post_operation_present():
+    _, o = _openapi()
+    post = o["paths"]["/v1/x402/chat/completions"].get("post")
+    assert post is not None
+    assert post["operationId"] == "purchaseClarityChatCompletion"
+    assert post["summary"] == "Buy a Clarity AI chat completion"
 
 
 # 7. POST operation has operationId, summary, description.
@@ -235,6 +244,32 @@ def test_openapi_no_real_secrets():
     # Only the redacted example skey is allowed.
     assert "gw_example_redacted" in blob
     assert "gw_" not in blob.replace("gw_example_redacted", "")
+
+
+# 12b. Direct chat OpenAPI contract.
+def test_chat_openapi_contract():
+    _, o = _openapi()
+    post = o["paths"]["/v1/x402/chat/completions"]["post"]
+    # request schema present and correctly restricted
+    schema = post["requestBody"]["content"]["application/json"]["schema"]
+    assert schema["required"] == ["model", "messages"]
+    props = schema["properties"]
+    assert props["model"]["enum"] == ["local:qwen3:1.7b"]
+    assert props["max_tokens"]["maximum"] == 128
+    assert props["max_tokens"]["minimum"] == 1
+    assert props["stream"]["enum"] == [False]
+    assert props["stream"]["default"] is False
+    # responses
+    assert set(post["responses"].keys()) >= {"200", "400", "402", "503"}
+    # x-payment-info
+    pi = post["x-payment-info"]
+    assert pi["price"]["mode"] == "fixed"
+    assert pi["price"]["currency"] == "USD"
+    assert pi["price"]["amount"] == "0.001000"
+    assert pi["protocols"] == [{"x402": {}}]
+    # 200 schema covers OpenAI-compatible completion fields
+    s200 = post["responses"]["200"]["content"]["application/json"]["schema"]
+    assert set(s200["required"]) >= {"id", "object", "model", "choices", "usage"}
 
 
 # 13. None of the unrelated routes appear in paths.

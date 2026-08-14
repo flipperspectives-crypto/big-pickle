@@ -18,7 +18,10 @@ router/provider monkeypatch restore) is handled by the individual test fixtures.
 
 import os
 
-os.environ.setdefault("GATEWAY_ADMIN_KEY", "testadmin")
+# Test-owned baseline. FORCE these (not setdefault) so a production parent shell
+# -- e.g. the Windows Clarity instance -- cannot leak real values into the suite
+# and make results order/environment dependent.
+os.environ["GATEWAY_ADMIN_KEY"] = "testadmin"
 # Ensure a writable DB path is always configured before app import so the
 # default "/data/gateway.db" (which does not exist in the test sandbox) is
 # never used regardless of import order.
@@ -28,4 +31,18 @@ if os.path.exists(_SHARED_DB):
         os.remove(_SHARED_DB)
     except OSError:
         pass
-os.environ.setdefault("GATEWAY_DB", _SHARED_DB)
+os.environ["GATEWAY_DB"] = _SHARED_DB
+# Default the network mode to testnet so mainnet fail-closed behavior is the
+# deterministic baseline (individual tests monkeypatch settings for mainnet).
+os.environ["X402_NETWORK_MODE"] = "testnet"
+
+# Strip any inherited production payment credentials so mainnet fail-closed
+# tests and testnet fixtures are deterministic (tests that need CDP creds set
+# them explicitly via monkeypatch).
+for _v in (
+    "CDP_API_KEY_ID",
+    "CDP_API_KEY_SECRET",
+    "X402_CDP_API_KEY_ID",
+    "X402_CDP_API_KEY_SECRET",
+):
+    os.environ.pop(_v, None)

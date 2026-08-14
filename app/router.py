@@ -224,7 +224,7 @@ def _anthropic_stream(r: httpx.Response, provider: str, model: str):
     return gen(), provider, model
 
 
-async def run_completion(body: dict, key_id: str):
+async def run_completion(body: dict, key_id: str, record_usage_flag: bool = True):
     model = body.get("model", "")
     stream = bool(body.get("stream"))
     providers_list = providers.providers_for(model)
@@ -256,13 +256,14 @@ async def run_completion(body: dict, key_id: str):
                 if not stream:
                     data, pt, ct = result
                     cost = providers.price_for(provider, payload["model"], pt, ct)
-                    record_usage(key_id, model, provider, pt, ct, cost)
+                    if record_usage_flag:
+                        record_usage(key_id, model, provider, pt, ct, cost)
                     if local_rt:
                         runtime.record_local_success(model, rt_ms, pt, ct)
                     return data, cost, provider
                 gen, provider_used, upstream_model = result
 
-                async def stream_with_usage(gen, provider_used, upstream_model, model, key_id):
+                async def stream_with_usage(gen, provider_used, upstream_model, model, key_id, record_usage_flag):
                     usage_p = usage_c = 0
                     async for line in gen:
                         if line.startswith("data:"):
@@ -278,9 +279,14 @@ async def run_completion(body: dict, key_id: str):
                                     pass
                         yield line
                     cost = providers.price_for(provider_used, upstream_model, usage_p, usage_c)
-                    record_usage(key_id, model, provider_used, usage_p, usage_c, cost)
+                    if record_usage_flag:
+                        record_usage(key_id, model, provider_used, usage_p, usage_c, cost)
 
-                return stream_with_usage(gen, provider_used, upstream_model, model, key_id), 0.0, provider
+                return (
+                    stream_with_usage(gen, provider_used, upstream_model, model, key_id, record_usage_flag),
+                    0.0,
+                    provider,
+                )
             except UpstreamError as e:
                 last_err = e
                 continue

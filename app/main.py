@@ -518,6 +518,40 @@ async def x402_topup(request: Request):
     return await x402.x402_topup(request)
 
 
+@app.post("/v1/x402/chat/completions")
+async def x402_chat_completions(request: Request):
+    # Fail-closed: this route must NEVER serve free local inference. The x402
+    # payment middleware verifies payment and, on success, attaches the verified
+    # payment payload to request.state before calling this handler. If no
+    # verified payment is present -- which is exactly what happens on mainnet
+    # when build_x402_middleware() returns None (no CDP credentials) -- refuse
+    # service. (The top-up route mirrors this via _payer_address as well.)
+    if not x402._payer_address(request):
+        raise HTTPException(503, "x402 payments are not enabled on this server")
+    # Gate order mirrors chat_completions: A body-size -> B local concurrency ->
+    # C handler validation + execution. The x402 middleware is the payment gate;
+    # this route performs NO auth, NO gateway balance check, NO credit creation.
+    # Direct local inference only (handled inside x402.handle_x402_chat).
+    raw = await _enforce_request_size(request)  # A
+
+    try:  # C (validation + execution)
+        body = json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+
+    # B. Local-inference concurrency (local:* models only). Fail fast; never
+    # block and build an unbounded backlog on the laptop.
+    local_slot = False
+    if not await _local_concurrency.acquire():
+        raise HTTPException(503, "local model is busy; please retry shortly.")
+    local_slot = True
+    try:
+        return await x402.handle_x402_chat(body)
+    finally:
+        if local_slot:
+            _local_concurrency.release()
+
+
 @app.post("/v1/checkout")
 async def create_checkout(
     request: Request,
@@ -606,12 +640,15 @@ def _verify_stripe_sig(secret: str, payload: str, signature: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _X402SCAN_GUIDANCE = (
-    "Clarity provides pay-per-use AI inference. First call POST /v1/x402/topup "
-    "with an empty JSON object. An unpaid request returns an x402 v2 402 payment "
-    "challenge. Pay exactly the network, asset and amount advertised by that live "
-    "challenge. After successful settlement the response returns a gateway skey. "
-    "Keep that skey secret and use it as Authorization: Bearer <skey> when calling "
-    "POST /v1/chat/completions."
+    "Clarity provides pay-per-use AI inference. The simplest one-shot machine "
+    "purchase is POST /v1/x402/chat/completions: send an OpenAI-style chat body, "
+    "pay the live x402 v2 402 challenge, and receive the completion directly. No "
+    "Clarity API key is required for that route. Initially only the local model "
+    "local:qwen3:1.7b is supported (stream=false, max_tokens <= 128). Alternatively, "
+    "POST /v1/x402/topup with an empty JSON object to purchase persistent gateway "
+    "credit (a secret skey); keep that skey secret and use it as Authorization: "
+    "Bearer <skey> when calling POST /v1/chat/completions. Pay exactly the "
+    "network, asset and amount advertised by the live challenge."
 )
 
 _TOPUP_OUTPUT_SCHEMA = {
@@ -653,14 +690,162 @@ _TOPUP_OUTPUT_SCHEMA = {
     },
 }
 
+# OpenAI-compatible completion returned by the direct paid route (safe example).
+_CHAT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["id", "object", "model", "choices", "usage"],
+    "properties": {
+        "id": {"type": "string"},
+        "object": {"type": "string", "enum": ["chat.completion"]},
+        "model": {"type": "string"},
+        "choices": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["index", "message", "finish_reason"],
+                "properties": {
+                    "index": {"type": "integer"},
+                    "message": {
+                        "type": "object",
+                        "required": ["role", "content"],
+                        "properties": {
+                            "role": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                    "finish_reason": {"type": "string"},
+                },
+            },
+        },
+        "usage": {
+            "type": "object",
+            "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+            "properties": {
+                "prompt_tokens": {"type": "integer"},
+                "completion_tokens": {"type": "integer"},
+                "total_tokens": {"type": "integer"},
+            },
+        },
+    },
+    "example": {
+        "id": "chatcmpl-example",
+        "object": "chat.completion",
+        "model": "qwen3:1.7b",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello from Clarity."},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    },
+}
+
+_CHAT_INPUT_SCHEMA = {
+    "type": "object",
+    "required": ["model", "messages"],
+    "properties": {
+        "model": {"type": "string", "enum": ["local:qwen3:1.7b"]},
+        "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+                "type": "object",
+                "required": ["role", "content"],
+                "properties": {
+                    "role": {"type": "string", "enum": ["system", "user", "assistant"]},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 128, "default": 128},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "stream": {"type": "boolean", "enum": [False], "default": False},
+    },
+}
+
 
 def discovery_openapi() -> dict:
     """Curated OpenAPI used for agent/x402scan discovery.
 
-    Exposes ONLY POST /v1/x402/topup as a machine-payable resource. Decimal USD
-    price metadata is discovery-only; the actual runtime charge remains the x402
-    atomic amount advertised by the live 402 challenge.
+    Exposes exactly the two machine-payable resources: POST /v1/x402/topup
+    (persistent gateway credit) and POST /v1/x402/chat/completions (direct
+    pay-per-request inference). Decimal USD price metadata is discovery-only;
+    the actual runtime charge remains the x402 atomic amount advertised by the
+    live 402 challenge.
     """
+    topup = {
+        "operationId": "purchaseClarityInferenceCredit",
+        "summary": "Purchase Clarity AI inference credit",
+        "description": (
+            "Machine-payable top-up. The caller makes an x402 v2 payment and, after "
+            "successful settlement, receives gateway credit plus a secret skey used to "
+            "authenticate inference at POST /v1/chat/completions. Send an empty JSON "
+            "object; an unpaid request returns a 402 payment challenge describing the "
+            "exact network, asset, and amount to pay."
+        ),
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                    "example": {},
+                }
+            },
+        },
+        "x-payment-info": {
+            "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+            "protocols": [{"x402": {}}],
+        },
+        "responses": {
+            "402": {"description": "Payment Required"},
+            "200": {
+                "description": "Successful x402 settlement and Clarity gateway credit",
+                "content": {"application/json": {"schema": _TOPUP_OUTPUT_SCHEMA}},
+            },
+        },
+    }
+    chat = {
+        "operationId": "purchaseClarityChatCompletion",
+        "summary": "Buy a Clarity AI chat completion",
+        "description": (
+            "Direct pay-per-request AI inference through Clarity using "
+            "local:qwen3:1.7b. Pay the live x402 challenge and receive an "
+            "OpenAI-compatible chat completion directly. No Clarity API key is "
+            "required. stream=false and max_tokens <= 128."
+        ),
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": _CHAT_INPUT_SCHEMA,
+                    "example": {
+                        "model": "local:qwen3:1.7b",
+                        "messages": [{"role": "user", "content": "Say hello in one sentence."}],
+                    },
+                }
+            },
+        },
+        "x-payment-info": {
+            "price": {"mode": "fixed", "currency": "USD", "amount": "0.001000"},
+            "protocols": [{"x402": {}}],
+        },
+        "responses": {
+            "400": {"description": "Invalid request (bad model, messages, tokens, or streaming)"},
+            "402": {"description": "Payment Required"},
+            "503": {"description": "Local inference slot unavailable"},
+            "200": {
+                "description": "OpenAI-compatible chat completion",
+                "content": {"application/json": {"schema": _CHAT_OUTPUT_SCHEMA}},
+            },
+        },
+    }
     return {
         "openapi": "3.1.0",
         "info": {
@@ -670,52 +855,8 @@ def discovery_openapi() -> dict:
             "x-guidance": _X402SCAN_GUIDANCE,
         },
         "paths": {
-            "/v1/x402/topup": {
-                "post": {
-                    "operationId": "purchaseClarityInferenceCredit",
-                    "summary": "Purchase Clarity AI inference credit",
-                    "description": (
-                        "Machine-payable top-up. The caller makes an x402 v2 "
-                        "payment and, after successful settlement, receives gateway "
-                        "credit plus a secret skey used to authenticate inference at "
-                        "POST /v1/chat/completions. Send an empty JSON object; an "
-                        "unpaid request returns a 402 payment challenge describing the "
-                        "exact network, asset, and amount to pay."
-                    ),
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {},
-                                    "additionalProperties": False,
-                                },
-                                "example": {},
-                            }
-                        },
-                    },
-                    "x-payment-info": {
-                        "price": {
-                            "mode": "fixed",
-                            "currency": "USD",
-                            "amount": "0.001000",
-                        },
-                        "protocols": [{"x402": {}}],
-                    },
-                    "responses": {
-                        "402": {"description": "Payment Required"},
-                        "200": {
-                            "description": "Successful x402 settlement and Clarity gateway credit",
-                            "content": {
-                                "application/json": {
-                                    "schema": _TOPUP_OUTPUT_SCHEMA,
-                                }
-                            },
-                        },
-                    },
-                }
-            }
+            "/v1/x402/topup": {"post": topup},
+            "/v1/x402/chat/completions": {"post": chat},
         },
     }
 

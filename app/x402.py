@@ -26,8 +26,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from x402 import x402ResourceServer
 from x402.http import HTTPFacilitatorClient, FacilitatorConfig
@@ -49,8 +50,20 @@ from .db import (
     get_key_by_name,
     settle_x402_credit,
 )
+from .router import UpstreamError, run_completion
 
 log = logging.getLogger("x402")
+
+# Route resource identifiers (must match the FastAPI route paths exactly). The
+# settlement hook uses payment_payload.resource.url to tell them apart.
+TOPUP_ROUTE = "/v1/x402/topup"
+CHAT_ROUTE = "/v1/x402/chat/completions"
+
+# Direct-paid inference is restricted to this single local model for the MVP.
+DIRECT_MODEL = "local:qwen3:1.7b"
+DIRECT_MAX_TOKENS = 128
+DIRECT_MAX_MESSAGES = 16
+DIRECT_MAX_TEXT_CHARS = 12000
 
 
 def _cdp_auth_available() -> bool:
@@ -167,12 +180,177 @@ def build_topup_route() -> RouteConfig:
     bazaar_extension[BAZAAR.key]["info"]["input"]["method"] = "POST"
     return RouteConfig(
         accepts=option,
-        resource="/v1/x402/topup",
+        resource=TOPUP_ROUTE,
         description="Clarity gateway credit top-up (machine-payable via x402)",
         mime_type="application/json",
         service_name="Clarity",
         extensions=bazaar_extension,
     )
+
+
+# ---------------------------------------------------------------------------
+# Direct pay-per-request inference route: POST /v1/x402/chat/completions
+#
+# No signup, no API key, no skey handoff, no second request. The payer pays the
+# live x402 challenge and the SAME request is retried with PAYMENT-SIGNATURE to
+# receive the local qwen3:1.7b completion directly. This route must NEVER
+# credit gateway balance, create a gateway key, or record customer usage -- it
+# is purely pay-per-request (see handle_x402_chat and the _after_settle guard).
+# ---------------------------------------------------------------------------
+
+_CHAT_INPUT_SCHEMA = {
+    "type": "object",
+    "required": ["model", "messages"],
+    "properties": {
+        "model": {"type": "string", "enum": [DIRECT_MODEL]},
+        "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": DIRECT_MAX_MESSAGES,
+            "items": {
+                "type": "object",
+                "required": ["role", "content"],
+                "properties": {
+                    "role": {"type": "string", "enum": ["system", "user", "assistant"]},
+                    "content": {"type": "string"},
+                },
+            },
+        },
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": DIRECT_MAX_TOKENS,
+            "default": DIRECT_MAX_TOKENS,
+        },
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "stream": {"type": "boolean", "enum": [False], "default": False},
+    },
+}
+
+
+def build_chat_route() -> RouteConfig:
+    option = PaymentOption(
+        scheme="exact",
+        pay_to=settings.X402_PAYTO,
+        price=settings.X402_PRICE_USD,
+        network=settings.X402_CHAIN_ID,
+        max_timeout_seconds=60,
+        extra={"assetTransferMethod": "eip3009"},
+    )
+    bazaar_extension = declare_discovery_extension(
+        input={
+            "model": DIRECT_MODEL,
+            "messages": [
+                {"role": "user", "content": "Say hello in one sentence."}
+            ],
+        },
+        input_schema=_CHAT_INPUT_SCHEMA,
+        body_type="json",
+        output=OutputConfig(
+            example={
+                "id": "chatcmpl-example",
+                "object": "chat.completion",
+                "model": "qwen3:1.7b",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hello from Clarity."},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        ),
+    )
+    bazaar_extension[BAZAAR.key]["info"]["input"]["method"] = "POST"
+    return RouteConfig(
+        accepts=option,
+        resource=CHAT_ROUTE,
+        description=(
+            "Direct pay-per-request AI inference through Clarity using "
+            f"{DIRECT_MODEL}. Pay the live x402 challenge and receive an "
+            "OpenAI-compatible chat completion directly."
+        ),
+        mime_type="application/json",
+        service_name="Clarity",
+        extensions=bazaar_extension,
+    )
+
+
+def _safe_chat_error(status: int) -> str:
+    if status == 404:
+        return "That model is not available from the local provider."
+    if status == 429:
+        return "The model is rate-limiting requests right now. Please retry shortly."
+    if 500 <= status < 600:
+        return "The model backend is temporarily unavailable. Please retry."
+    return "The model backend returned an error. Please retry."
+
+
+async def handle_x402_chat(body: object) -> dict:
+    """Validate a direct-paid chat request and run LOCAL inference only.
+
+    Returns an OpenAI-compatible completion dict. Raises fastapi.HTTPException
+    for client/backend errors. Never creates a gateway key, never credits
+    balance, and never records customer usage (run_completion(record_usage=False)).
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    model = body.get("model")
+    if model != DIRECT_MODEL:
+        raise HTTPException(400, f"only {DIRECT_MODEL} is supported on this route")
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not (1 <= len(messages) <= DIRECT_MAX_MESSAGES):
+        raise HTTPException(400, "messages must be an array of 1..16 items")
+    total_text = 0
+    allowed_roles = ("system", "user", "assistant")
+    for m in messages:
+        if not isinstance(m, dict):
+            raise HTTPException(400, "each message must be an object")
+        if m.get("role") not in allowed_roles:
+            raise HTTPException(400, "message role must be one of system/user/assistant")
+        content = m.get("content")
+        if not isinstance(content, str) or content == "":
+            raise HTTPException(400, "message content must be a non-empty string")
+        total_text += len(content)
+    if total_text > DIRECT_MAX_TEXT_CHARS:
+        raise HTTPException(400, "total message text exceeds 12000 characters")
+
+    stream = body.get("stream", False)
+    if stream is True:
+        raise HTTPException(400, "streaming is not supported on this route")
+
+    max_tokens = body.get("max_tokens", DIRECT_MAX_TOKENS)
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not (
+        1 <= max_tokens <= DIRECT_MAX_TOKENS
+    ):
+        raise HTTPException(400, f"max_tokens must be an integer between 1 and {DIRECT_MAX_TOKENS}")
+
+    temperature = body.get("temperature")
+    if temperature is not None:
+        if not isinstance(temperature, (int, float)) or isinstance(temperature, bool) or not (
+            0 <= temperature <= 2
+        ):
+            raise HTTPException(400, "temperature must be a number between 0 and 2")
+
+    # Build the execution body. qwen3 reasoning is disabled to minimize hidden
+    # thinking latency for this direct route. The local OpenAI-compatible path
+    # forwards `think` straight through to Ollama.
+    exec_body = {
+        "model": DIRECT_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "think": False,
+    }
+    if temperature is not None:
+        exec_body["temperature"] = temperature
+
+    try:
+        data, _cost, _provider = await run_completion(exec_body, key_id=None, record_usage_flag=False)
+    except UpstreamError as e:
+        raise HTTPException(e.status, _safe_chat_error(e.status))
+    return data
 
 
 def _payment_id(payer: str, inner: dict, network: str, amount: str) -> str:
@@ -184,16 +362,28 @@ def _payment_id(payer: str, inner: dict, network: str, amount: str) -> str:
 
 
 def _after_settle(context) -> None:
-    """Credit the gateway key ONLY after a successful settlement.
+    """Credit the gateway key ONLY after a successful TOP-UP settlement.
 
     Runs exclusively on settlement success (the x402 middleware never invokes
     after_settle on settlement failure). The ledger makes the credit idempotent:
     replaying the exact same payment reuses the same payment_id and is skipped.
+
+    Route isolation: only the top-up resource (POST /v1/x402/topup) credits
+    gateway balance and creates a payer key. The direct inference resource
+    (POST /v1/x402/chat/completions) is pay-per-request and must NEVER credit
+    balance, create a key, or record usage. The settled resource identity is the
+    SDK-supported ``payment_payload.resource.url`` (the route the 402 challenge
+    was issued for), not a payer/amount/timing heuristic.
     """
     payload = getattr(context, "payment_payload", None)
     requirements = getattr(context, "requirements", None)
     result = getattr(context, "result", None)
     if payload is None or requirements is None or result is None:
+        return
+
+    resource = getattr(getattr(payload, "resource", None), "url", None)
+    if resource != TOPUP_ROUTE:
+        # Direct inference settlement (or any non-topup resource): no credit.
         return
 
     inner = getattr(payload, "payload", None) or {}
@@ -270,7 +460,10 @@ def build_x402_middleware(
     # is enriched with the live HTTP method (POST) for facilitator cataloging.
     server.register_extension(bazaar_resource_server_extension)
     server.on_after_settle(_after_settle)
-    routes = {"/v1/x402/topup": build_topup_route()}
+    routes = {
+        TOPUP_ROUTE: build_topup_route(),
+        CHAT_ROUTE: build_chat_route(),
+    }
     return payment_middleware(
         routes, server, sync_facilitator_on_start=sync_facilitator_on_start
     )
