@@ -377,3 +377,41 @@ def test_no_real_payment_or_inference(clarity_x402_bazaar):
     r = client.post("/v1/x402/topup", json={})
     assert r.status_code == 402
     assert fac.settled == 0
+
+
+# 21. The advertised direct-chat price must truthfully match the runtime
+#     configured price and must never regress to the audit's "0.00" artifact.
+#     The read-only audit observed 0.00 because AgentCash's discover tool renders
+#     the price with 2-decimal precision (0.001 -> "0.00"); the source has
+#     always advertised "0.001000" (decimal USD) == 1000 atomic USDC, matching
+#     settings.X402_PRICE_USD and the live x402 challenge accepts[].amount="1000".
+def test_chat_advertised_price_matches_runtime(clarity_x402_bazaar):
+    s = config_mod.settings
+    _, o = _openapi()
+    chat = o["paths"]["/v1/x402/chat/completions"]["post"]
+    pi = chat["x-payment-info"]
+
+    # Forbid the 0.00 artifact and any zero/empty price.
+    amount = pi["price"]["amount"]
+    assert amount not in ("0.00", "0", "0.0", "")
+    assert float(amount) != 0.0
+
+    # Advertised decimal-USD amount equals the runtime configured price.
+    assert float(amount) == float(s.X402_PRICE_USD)
+
+    # 1 USDC == 1e6 atomic units; runtime challenge charges 1000 atomic for 0.001 USD.
+    assert int(float(amount) * 1_000_000) == 1000
+
+    # Network/asset/protocol metadata stays consistent with the real x402 challenge.
+    assert pi["price"]["mode"] == "fixed"
+    assert pi["price"]["currency"] == "USD"
+    assert pi["protocols"] == [{"x402": {}}]
+
+    # Route remains discoverable.
+    assert chat["operationId"] == "purchaseClarityChatCompletion"
+    assert chat["summary"] == "Buy a Clarity AI chat completion"
+
+    # Top-up metadata is unaffected and likewise truthful.
+    topup = o["paths"]["/v1/x402/topup"]["post"]["x-payment-info"]
+    assert topup["price"]["amount"] == pi["price"]["amount"]
+    assert topup["protocols"] == [{"x402": {}}]
