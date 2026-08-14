@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -64,6 +65,21 @@ DIRECT_MODEL = "local:qwen3:1.7b"
 DIRECT_MAX_TOKENS = 128
 DIRECT_MAX_MESSAGES = 16
 DIRECT_MAX_TEXT_CHARS = 12000
+
+
+def _absolute_resource(path: str) -> str:
+    """Build the absolute public HTTPS resource URL for an x402 route.
+
+    The emitted ``PAYMENT-REQUIRED`` challenge must carry an absolute
+    ``resource.url`` (``https://...``) so external validators such as the
+    Coinbase x402 Bazaar accept it. We derive it from the configured canonical
+    public origin (``settings.X402_PUBLIC_ORIGIN``) rather than the request
+    ``Host``/``X-Forwarded-Host`` header, which a proxy or client can spoof.
+    The relative ``path`` argument is still used as the internal route key and
+    for matching, so only the advertised URL changes.
+    """
+    origin = settings.X402_PUBLIC_ORIGIN.rstrip("/")
+    return f"{origin}{path}"
 
 
 def _cdp_auth_available() -> bool:
@@ -180,7 +196,7 @@ def build_topup_route() -> RouteConfig:
     bazaar_extension[BAZAAR.key]["info"]["input"]["method"] = "POST"
     return RouteConfig(
         accepts=option,
-        resource=TOPUP_ROUTE,
+        resource=_absolute_resource(TOPUP_ROUTE),
         description="Clarity gateway credit top-up (machine-payable via x402)",
         mime_type="application/json",
         service_name="Clarity",
@@ -265,7 +281,7 @@ def build_chat_route() -> RouteConfig:
     bazaar_extension[BAZAAR.key]["info"]["input"]["method"] = "POST"
     return RouteConfig(
         accepts=option,
-        resource=CHAT_ROUTE,
+        resource=_absolute_resource(CHAT_ROUTE),
         description=(
             "Direct pay-per-request AI inference through Clarity using "
             f"{DIRECT_MODEL}. Pay the live x402 challenge and receive an "
@@ -382,7 +398,10 @@ def _after_settle(context) -> None:
         return
 
     resource = getattr(getattr(payload, "resource", None), "url", None)
-    if resource != TOPUP_ROUTE:
+    # Match on the URL path so this holds whether the advertised resource.url is
+    # the relative route or the configured absolute public origin URL.
+    resource_path = (urlparse(resource or "").path or "").rstrip("/")
+    if resource_path != TOPUP_ROUTE:
         # Direct inference settlement (or any non-topup resource): no credit.
         return
 

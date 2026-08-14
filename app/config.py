@@ -46,6 +46,14 @@ class Settings:
     X402_ENABLED: bool = _env("X402_ENABLED", "false").lower() in ("1", "true", "yes")
     X402_PAYTO: str = _env("X402_PAYTO", "")  # gateway receiving wallet (public address)
     X402_PRICE_USD: str = _env("X402_PRICE_USD", "0.001")
+    # Canonical public origin used to build ABSOLUTE x402 resource URLs in the
+    # PAYMENT-REQUIRED challenge. External validators (e.g. Coinbase x402 Bazaar)
+    # require resource.url to be a full https:// URL. We source this from a fixed
+    # configured origin rather than the request Host/X-Forwarded-Host header, which
+    # a proxy or client could spoof. Defaults to the deployed Clarity funnel host.
+    X402_PUBLIC_ORIGIN: str = _env(
+        "X402_PUBLIC_ORIGIN", "https://desktop-o99r0sf.tail935fba.ts.net"
+    ).rstrip("/")
 
     _X402_TESTNET = {
         "chain_id": "eip155:84532",

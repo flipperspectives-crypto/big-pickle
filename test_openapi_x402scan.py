@@ -105,6 +105,7 @@ def clarity_x402_bazaar(tmp_path):
         "X402_CDP_API_KEY_ID": s.X402_CDP_API_KEY_ID,
         "X402_CDP_API_KEY_SECRET": s.X402_CDP_API_KEY_SECRET,
         "X402_ENABLED": s.X402_ENABLED,
+        "X402_PUBLIC_ORIGIN": s.X402_PUBLIC_ORIGIN,
     }
     s.DB_PATH = str(tmp_path / "openapi_x402.db")
     s.X402_PAYTO = EXPECTED_PAYTO
@@ -118,6 +119,7 @@ def clarity_x402_bazaar(tmp_path):
     s.X402_CDP_API_KEY_ID = ""
     s.X402_CDP_API_KEY_SECRET = ""
     s.X402_ENABLED = False
+    s.X402_PUBLIC_ORIGIN = "https://clarity-test.example"
     db_mod.init_db()
     yield
     for k, v in saved.items():
@@ -415,3 +417,102 @@ def test_chat_advertised_price_matches_runtime(clarity_x402_bazaar):
     topup = o["paths"]["/v1/x402/topup"]["post"]["x-payment-info"]
     assert topup["price"]["amount"] == pi["price"]["amount"]
     assert topup["protocols"] == [{"x402": {}}]
+
+
+# 22. The emitted PAYMENT-REQUIRED resource.url MUST be an absolute https:// URL
+#     (Coinbase x402 Bazaar rejects relative resource urls). This applies to BOTH
+#     paid routes, and the price/network/asset/payTo fields must be unchanged.
+def test_resource_url_absolute_https_both_routes(clarity_x402_bazaar):
+    fac = FakeFacilitator()
+    client = TestClient(_make_app(fac))
+    expected_origin = config_mod.settings.X402_PUBLIC_ORIGIN.rstrip("/")
+    for path in ("/v1/x402/chat/completions", "/v1/x402/topup"):
+        r = client.post(path, json={})
+        assert r.status_code == 402, (path, r.status_code, r.text)
+        obj = json.loads(base64.b64decode(r.headers["payment-required"]))
+        url = obj["resource"]["url"]
+        assert url.startswith("https://"), url
+        assert url == f"{expected_origin}{path}", url
+        # Pricing/network/asset/payTo must be unchanged by the URL fix.
+        a = obj["accepts"][0]
+        assert a["scheme"] == "exact"
+        assert a["amount"] == "1000"
+        assert a["network"] == TESTNET_CHAIN
+        assert a["asset"] == TESTNET_ASSET
+        assert a["payTo"] == EXPECTED_PAYTO
+        assert a["extra"]["assetTransferMethod"] == "eip3009"
+
+
+# 23. after_settle must still credit top-up when the settled resource.url is the
+#     absolute public URL (path-based matching), and must NOT credit a direct
+#     chat settlement. Regresses the bug where an absolute resource.url would
+#     stop top-up credit because the hook compared against the relative route.
+def test_after_settle_absolute_topup_credits(monkeypatch, clarity_x402_bazaar):
+    import types
+
+    from app.x402 import _after_settle
+
+    calls = []
+    monkeypatch.setattr(
+        x402_mod,
+        "settle_x402_credit",
+        lambda **kw: calls.append(kw) or {"id": "c1"},
+    )
+
+    class _Payload:
+        resource = types.SimpleNamespace(url="https://clarity-test.example/v1/x402/topup")
+        payload = {"authorization": {"from": "0xpayer"}}
+
+    class _Req:
+        network = TESTNET_CHAIN
+        asset = TESTNET_ASSET
+        amount = "1000"
+
+    class _Res:
+        payer = "0xpayer"
+        transaction = "0xtx"
+
+    class _Ctx:
+        payment_payload = _Payload()
+        requirements = _Req()
+        result = _Res()
+
+    _after_settle(_Ctx())
+    assert calls, "top-up settlement with absolute resource.url must credit"
+    assert calls[0]["payer"] == "0xpayer"
+
+
+def test_after_settle_absolute_chat_does_not_credit(monkeypatch, clarity_x402_bazaar):
+    import types
+
+    from app.x402 import _after_settle
+
+    calls = []
+    monkeypatch.setattr(
+        x402_mod,
+        "settle_x402_credit",
+        lambda **kw: calls.append(kw) or {"id": "c1"},
+    )
+
+    class _Payload:
+        resource = types.SimpleNamespace(
+            url="https://clarity-test.example/v1/x402/chat/completions"
+        )
+        payload = {"authorization": {"from": "0xpayer"}}
+
+    class _Req:
+        network = TESTNET_CHAIN
+        asset = TESTNET_ASSET
+        amount = "1000"
+
+    class _Res:
+        payer = "0xpayer"
+        transaction = "0xtx"
+
+    class _Ctx:
+        payment_payload = _Payload()
+        requirements = _Req()
+        result = _Res()
+
+    _after_settle(_Ctx())
+    assert calls == [], "direct chat settlement must NEVER credit gateway balance"

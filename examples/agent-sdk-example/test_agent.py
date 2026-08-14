@@ -22,6 +22,7 @@ import clarity_agent  # noqa: E402
 from clarity_agent import (  # noqa: E402
     ClarityAgent,
     PaymentRequired,
+    DEFAULT_BASE_URL,
     discover_clarity,
     demo,
     demo_direct,
@@ -32,11 +33,12 @@ from clarity_agent import (  # noqa: E402
 )
 
 # A realistic x402 v2 PAYMENT-REQUIRED header (mirrors what /v1/x402/topup sends).
+# resource.url is the ABSOLUTE https URL the fixed gateway now advertises.
 FAKE_PR_HEADER = base64.b64encode(
     json.dumps(
         {
             "x402Version": 2,
-            "resource": {"url": "/v1/x402/topup"},
+            "resource": {"url": f"{DEFAULT_BASE_URL}/v1/x402/topup"},
             "accepts": [
                 {
                     "scheme": "exact",
@@ -54,12 +56,13 @@ FAKE_PR_HEADER = base64.b64encode(
 
 
 # Mirrors what /v1/x402/chat/completions (DIRECT paid inference) sends. The
-# resource identifies the direct route and distinguishes it from top-up.
+# resource identifies the direct route (absolute https URL) and distinguishes it
+# from top-up.
 FAKE_CHAT_PR_HEADER = base64.b64encode(
     json.dumps(
         {
             "x402Version": 2,
-            "resource": {"url": "/v1/x402/chat/completions"},
+            "resource": {"url": f"{DEFAULT_BASE_URL}/v1/x402/chat/completions"},
             "accepts": [
                 {
                     "scheme": "exact",
@@ -251,7 +254,7 @@ def test_direct_chat_402_parses_resource_and_fields(fake_server):
     agent = ClarityAgent()
     pr, _raw, _body = agent.chat_challenge()
     # The agent can identify network, asset, amount, payTo AND resource.
-    assert pr.resource == "/v1/x402/chat/completions"
+    assert pr.resource == f"{DEFAULT_BASE_URL}/v1/x402/chat/completions"
     assert pr.network == "eip155:84532"
     assert pr.asset == "0x036CbD53842c5426634e7929541eC2318f3dCF7E"
     assert pr.amount == "1000"
@@ -263,7 +266,7 @@ def test_agent_direct_flow_dry_run_stops_before_signing(fake_server):
     result = asyncio.run(agent.run_direct())
     assert result["mode"] == "dry-run"
     assert result["flow"] == "direct"
-    assert result["payment_required"]["resource"] == "/v1/x402/chat/completions"
+    assert result["payment_required"]["resource"] == f"{DEFAULT_BASE_URL}/v1/x402/chat/completions"
     assert "dry_run_plan" in result
     # DRY-RUN must never sign or settle.
     assert result["payment_signed"] is False
@@ -274,7 +277,7 @@ def test_agent_direct_flow_dry_run_stops_before_signing(fake_server):
     assert sig.startswith("SIMULATED.")
     decoded = json.loads(base64.b64decode(sig.split(".", 1)[1]))
     assert decoded["simulated"] is True
-    assert decoded["resource"] == "/v1/x402/chat/completions"
+    assert decoded["resource"] == f"{DEFAULT_BASE_URL}/v1/x402/chat/completions"
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +294,7 @@ def test_discover_from_origin_only_begins_with_base_url():
     assert result["discovery"]["selected_route"] == "/v1/x402/chat/completions"
     assert result["discovery"]["selected_method"] == "POST"
     assert "selection_reason" in result["discovery"]
-    assert result["payment_required"]["resource"] == "/v1/x402/chat/completions"
+    assert result["payment_required"]["resource"] == f"{DEFAULT_BASE_URL}/v1/x402/chat/completions"
     # dry-run STOP before signing.
     assert result["payment_signed"] is False
 
