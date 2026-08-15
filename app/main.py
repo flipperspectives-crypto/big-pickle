@@ -975,7 +975,11 @@ def discovery_openapi() -> dict:
         "paths": {
             "/v1/x402/topup": {"post": topup},
             "/v1/x402/chat/completions": {"post": chat},
-            "/v1/x402/solana/chat/completions": {"post": solana_chat},
+            **(
+                {"/v1/x402/solana/chat/completions": {"post": solana_chat}}
+                if settings.X402_SOLANA_ENABLED
+                else {}
+            ),
         },
     }
 

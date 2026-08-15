@@ -164,16 +164,29 @@ def test_openapi_guidance_present():
     assert g and isinstance(g, str) and g.strip()
 
 
-# 5. paths contains exactly the payable resources (Base top-up, Base direct
-#    chat, and the SEPARATE Solana-devnet direct chat). Base routes are
-#    unchanged; Solana is additive only.
+# 5. paths contains exactly the payable resources. When Solana x402 is ENABLED
+#    the SEPARATE Solana-devnet direct chat is advertised alongside the two Base
+#    routes; when DISABLED (the production default) only the two Base routes are
+#    advertised. Base routes are unchanged in either case.
 def test_openapi_paths_only_three():
-    _, o = _openapi()
-    assert list(o["paths"].keys()) == [
-        "/v1/x402/topup",
-        "/v1/x402/chat/completions",
-        "/v1/x402/solana/chat/completions",
-    ]
+    s = config_mod.settings
+    previous = s.X402_SOLANA_ENABLED
+    try:
+        s.X402_SOLANA_ENABLED = False
+        _, o = _openapi()
+        assert list(o["paths"].keys()) == [
+            "/v1/x402/topup",
+            "/v1/x402/chat/completions",
+        ]
+        s.X402_SOLANA_ENABLED = True
+        _, o = _openapi()
+        assert list(o["paths"].keys()) == [
+            "/v1/x402/topup",
+            "/v1/x402/chat/completions",
+            "/v1/x402/solana/chat/completions",
+        ]
+    finally:
+        s.X402_SOLANA_ENABLED = previous
 
 
 # 6. that path contains exactly the intended POST discovery operation.
@@ -660,14 +673,28 @@ def clarity_x402_solana(tmp_path):
 # 24. Live discovery exposes the third (Solana devnet) payable route; Base
 #     entries are unchanged.
 def test_openapi_solana_discovery_present():
-    _, o = _openapi()
-    sol_post = o["paths"]["/v1/x402/solana/chat/completions"]["post"]
-    assert sol_post["operationId"] == "purchaseClaritySolanaDevnetChatCompletion"
-    assert sol_post["summary"] == "Buy a Clarity AI chat completion (Solana devnet x402)"
-    assert sol_post["x-payment-info"]["network"] == SOLANA_NETWORK
-    # Base discovery is untouched.
-    base_post = o["paths"]["/v1/x402/chat/completions"]["post"]
-    assert base_post["operationId"] == "purchaseClarityChatCompletion"
+    s = config_mod.settings
+    previous = s.X402_SOLANA_ENABLED
+    try:
+        # DISABLED: Solana route must NOT be advertised; Base discovery intact.
+        s.X402_SOLANA_ENABLED = False
+        _, o = _openapi()
+        assert "/v1/x402/solana/chat/completions" not in o["paths"]
+        base_post = o["paths"]["/v1/x402/chat/completions"]["post"]
+        assert base_post["operationId"] == "purchaseClarityChatCompletion"
+
+        # ENABLED: Solana route advertised with correct metadata.
+        s.X402_SOLANA_ENABLED = True
+        _, o = _openapi()
+        sol_post = o["paths"]["/v1/x402/solana/chat/completions"]["post"]
+        assert sol_post["operationId"] == "purchaseClaritySolanaDevnetChatCompletion"
+        assert sol_post["summary"] == "Buy a Clarity AI chat completion (Solana devnet x402)"
+        assert sol_post["x-payment-info"]["network"] == SOLANA_NETWORK
+        # Base discovery is untouched.
+        base_post = o["paths"]["/v1/x402/chat/completions"]["post"]
+        assert base_post["operationId"] == "purchaseClarityChatCompletion"
+    finally:
+        s.X402_SOLANA_ENABLED = previous
 
 
 # 25. Solana route generates HTTP 402 with correct x402 v2 / Solana devnet

@@ -131,3 +131,53 @@ def test_no_secrets_in_new_files():
         with open(os.path.join(base, name), "r", encoding="utf-8") as f:
             content = f.read()
         assert not bad.search(content), f"possible secret in static/{name}"
+
+
+# --- Solana x402 route visibility in discovery (Step 1 fix) ----------------
+
+SOLANA_ROUTE = "/v1/x402/solana/chat/completions"
+
+
+def test_solana_route_absent_when_disabled(client):
+    previous = main_mod.settings.X402_SOLANA_ENABLED
+    main_mod.settings.X402_SOLANA_ENABLED = False
+    try:
+        paths = client.get("/openapi.json").json()["paths"]
+    finally:
+        main_mod.settings.X402_SOLANA_ENABLED = previous
+    assert SOLANA_ROUTE not in paths
+
+
+def test_solana_route_present_when_enabled(client):
+    previous = main_mod.settings.X402_SOLANA_ENABLED
+    main_mod.settings.X402_SOLANA_ENABLED = True
+    try:
+        paths = client.get("/openapi.json").json()["paths"]
+    finally:
+        main_mod.settings.X402_SOLANA_ENABLED = previous
+    assert SOLANA_ROUTE in paths
+    assert "post" in paths[SOLANA_ROUTE]
+
+
+def test_base_chat_route_present_in_discovery(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/v1/x402/chat/completions" in paths
+    assert "post" in paths["/v1/x402/chat/completions"]
+    # The canonical Base paid route must remain advertised regardless of Solana flag.
+    previous = main_mod.settings.X402_SOLANA_ENABLED
+    main_mod.settings.X402_SOLANA_ENABLED = False
+    try:
+        paths2 = client.get("/openapi.json").json()["paths"]
+    finally:
+        main_mod.settings.X402_SOLANA_ENABLED = previous
+    assert "/v1/x402/chat/completions" in paths2
+    assert "post" in paths2["/v1/x402/chat/completions"]
+
+
+def test_price_unchanged_after_solana_fix(client):
+    # Discovery price must remain exactly $0.001 on the Base chat route.
+    chat = client.get("/openapi.json").json()["paths"]["/v1/x402/chat/completions"]["post"]
+    amount = chat["x-payment-info"]["price"]["amount"]
+    assert amount == "0.001000"
+    assert float(amount) == 0.001
+    assert config_mod.settings.X402_PRICE_USD == "0.001"
