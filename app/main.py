@@ -110,6 +110,45 @@ async def index():
     )
 
 
+@app.get("/agents")
+async def agents_landing() -> Response:
+    """Public agent-facing landing page (discovery + install). No auth, no payment."""
+    page = os.path.join(_STATIC, "agents.html")
+    if not os.path.exists(page):
+        return Response(content="Agent guide not found", media_type="text/plain", status_code=404)
+    with open(page, "r", encoding="utf-8") as f:
+        html = f.read()
+    version = get_build_info()["asset_version"]
+    html = html.replace("/static/app.css", f"/static/app.css?v={version}")
+    html = html.replace("/static/app.js", f"/static/app.js?v={version}")
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@app.get("/skills.md")
+async def skills_md() -> Response:
+    """Machine-readable agent skill (x402 paid inference). No auth, no payment."""
+    path = os.path.join(_STATIC, "skills.md")
+    if not os.path.exists(path):
+        return Response(content="Skill not found", media_type="text/plain", status_code=404)
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 class KeyRequest(BaseModel):
     name: str
 
@@ -925,6 +964,11 @@ def discovery_openapi() -> dict:
         "info": {
             "title": "Clarity Agent API",
             "version": app.version,
+            "description": (
+                "Clarity provides pay-per-call AI inference for agents. "
+                "OpenAI-compatible. $0.001 USDC per call over x402 on Base. "
+                "Agent guide: /agents. Machine-readable skill: /skills.md."
+            ),
             "contact": {"email": "onelovefuck@gmail.com"},
             "x-guidance": _X402SCAN_GUIDANCE,
         },

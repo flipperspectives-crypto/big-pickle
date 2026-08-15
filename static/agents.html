@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Clarity — pay-per-call AI inference for agents. OpenAI-compatible. $0.001 USDC per call over x402 on Base.">
+<meta name="color-scheme" content="dark">
+<title>Clarity — For Agents</title>
+<style>
+  :root{
+    --bg:#050505; --panel:#0d0e10; --panel-2:#121316; --line:#1d2024;
+    --text:#e7e9ec; --muted:#7a8290; --accent:#ff7a18; --accent-2:#ffb070;
+    --ok:#3ddc84; --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'Inter',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px;margin:0 auto;padding:0 22px}
+  header.nav{position:sticky;top:0;z-index:10;background:rgba(5,5,5,.85);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  .nav-inner{max-width:960px;margin:0 auto;padding:14px 22px;display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.5px}
+  .brand-mark{width:18px;height:18px;border-radius:5px;background:var(--bg);position:relative;display:inline-block}
+  .brand-mark::after{content:"";position:absolute;inset:5px;border-radius:50%;background:var(--accent)}
+  .brand-sub{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:1.5px}
+  .nav a.top{color:var(--muted);font-size:14px}
+  .hero{padding:72px 0 40px;text-align:center}
+  .eyebrow{display:inline-block;font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--accent);border:1px solid var(--line);padding:6px 12px;border-radius:999px;margin-bottom:20px}
+  h1{font-size:clamp(30px,6vw,52px);line-height:1.05;margin:0 0 14px;font-weight:750}
+  h1 .accent{color:var(--accent)}
+  .sub{color:var(--muted);font-size:18px;max-width:640px;margin:0 auto 28px}
+  .pill-row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .pill{font-family:var(--mono);font-size:13px;background:var(--panel);border:1px solid var(--line);padding:8px 14px;border-radius:999px;color:var(--text)}
+  .pill b{color:var(--accent-2)}
+  section.block{padding:40px 0;border-top:1px solid var(--line)}
+  h2{font-size:24px;margin:0 0 6px}
+  .lead{color:var(--muted);margin:0 0 22px;max-width:680px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:720px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+  .card h3{margin:0 0 12px;font-size:15px;color:var(--accent-2);letter-spacing:.5px}
+  .steps{counter-reset:s;list-style:none;padding:0;margin:0}
+  .steps li{position:relative;padding:10px 0 10px 38px;border-left:1px solid var(--line);margin-left:12px}
+  .steps li::before{counter-increment:s;content:counter(s);position:absolute;left:-13px;top:10px;width:24px;height:24px;border-radius:50%;background:var(--panel-2);border:1px solid var(--accent);color:var(--accent);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px}
+  pre{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:16px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.55;color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .facts{list-style:none;padding:0;margin:0}
+  .facts li{padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+  .facts li:last-child{border-bottom:0}
+  .facts b{color:var(--accent-2);font-family:var(--mono);font-weight:500}
+  .btn{display:inline-block;font-family:var(--sans);font-size:14px;font-weight:600;border-radius:10px;padding:10px 16px;border:1px solid transparent;cursor:pointer}
+  .btn-primary{background:var(--accent);color:#1a0d00}
+  .btn-primary:hover{background:var(--accent-2);text-decoration:none}
+  .btn-ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+  .btn-ghost:hover{border-color:var(--accent);text-decoration:none}
+  .btn-sm{font-size:13px;padding:8px 12px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  .note{color:var(--muted);font-size:13px;margin-top:10px}
+  footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted);font-size:13px;text-align:center}
+  code{font-family:var(--mono);color:var(--accent-2);background:var(--panel-2);padding:1px 6px;border-radius:6px;font-size:12px}
+</style>
+</head>
+<body>
+<header class="nav">
+  <div class="nav-inner">
+    <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span>CLARITY<br><span class="brand-sub">FOR AGENTS</span></span></span>
+    <a class="top" href="/">← Back to Clarity</a>
+  </div>
+</header>
+
+<main>
+  <section class="hero wrap">
+    <span class="eyebrow">Agent Distribution</span>
+    <h1>Pay-per-call AI inference <span class="accent">for agents.</span></h1>
+    <p class="sub">OpenAI-compatible. <b>$0.001 USDC</b> per call over <b>x402</b> on <b>Base</b>. No API key, no subscription — your agent pays per request and settles on-chain.</p>
+    <div class="pill-row">
+      <span class="pill">POST <b>/v1/x402/chat/completions</b></span>
+      <span class="pill"><b>$0.001</b> USDC / call</span>
+      <span class="pill">Base mainnet <b>eip155:8453</b></span>
+      <span class="pill">Model <b>local:qwen3:1.7b</b></span>
+    </div>
+  </section>
+
+  <section class="block wrap">
+    <h2>How it works (x402)</h2>
+    <p class="lead">Clarity speaks the standard x402 v2 payment handshake. Your agent discovers the price, signs with its own Base wallet, and retries — no Clarity account required.</p>
+    <ol class="steps">
+      <li><b>Discover.</b> GET <code>/openapi.json</code> to read the live price, network, asset, and <code>payTo</code> before signing.</li>
+      <li><b>Request.</b> POST an unpaid OpenAI-style body to the canonical endpoint.</li>
+      <li><b>Challenge.</b> The endpoint returns <code>402</code> + a <code>PAYMENT-REQUIRED</code> header describing exactly what to pay.</li>
+      <li><b>Sign.</b> Your agent signs the payment with its own funded Base wallet (official <code>x402</code> SDK).</li>
+      <li><b>Retry.</b> Re-POST with the <code>PAYMENT-SIGNATURE</code> header and receive the completion directly.</li>
+    </ol>
+  </section>
+
+  <section class="block wrap">
+    <h2>Install the Clarity skill</h2>
+    <p class="lead">Copy this prompt to your agent. It installs the machine-readable skill and teaches the agent when to use Clarity, how to discover the payment requirement, and to confirm before the first paid call.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Setup prompt</h3>
+        <pre id="setup-prompt">Install the Clarity skill from https://desktop-o99r0sf.tail935fba.ts.net/skills.md. Use Clarity when I need low-cost OpenAI-compatible inference. Discover the payment requirement first and confirm with me before making the first paid call unless I have already authorized a budget. Never expose private keys or wallet secrets.</pre>
+        <div class="row">
+          <button class="btn btn-primary btn-sm" id="copy-prompt" type="button">Copy setup prompt</button>
+        </div>
+        <p class="note">The skill file lives at <a href="/skills.md">/skills.md</a> and is served as <code>text/markdown</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Quick facts</h3>
+        <ul class="facts">
+          <li><b>Endpoint</b> — POST /v1/x402/chat/completions</li>
+          <li><b>Price</b> — $0.001 USDC per call (1000 atomic)</li>
+          <li><b>Network</b> — Base mainnet, eip155:8453, USDC</li>
+          <li><b>Protocol</b> — x402 v2 (402 → PAYMENT-REQUIRED → PAYMENT-SIGNATURE → retry → completion)</li>
+          <li><b>Model</b> — local:qwen3:1.7b, max_tokens ≤ 128</li>
+        </ul>
+        <div class="row">
+          <a class="btn btn-ghost btn-sm" href="/skills.md">View skill.md</a>
+          <a class="btn btn-ghost btn-sm" href="/openapi.json">OpenAPI</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block wrap">
+    <h2>Working request example</h2>
+    <p class="lead">An unpaid request returns a <code>402</code> challenge. Sign it with the official x402 SDK and retry with <code>PAYMENT-SIGNATURE</code>.</p>
+    <pre>curl -X POST https://desktop-o99r0sf.tail935fba.ts.net/v1/x402/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local:qwen3:1.7b","messages":[{"role":"user","content":"Say hello in one sentence."}]}'
+
+# -> 402 + PAYMENT-REQUIRED (base64 JSON: network, asset, amount, payTo, resource)
+# Sign with your Base wallet, then retry with header:
+#   PAYMENT-SIGNATURE: &lt;signed x402 payment&gt;
+# -> 200 + OpenAI-compatible completion</pre>
+    <p class="note">Full machine-readable contract: <a href="/openapi.json">/openapi.json</a>. Full skill: <a href="/skills.md">/skills.md</a>.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">Clarity — pay-per-call AI inference · x402 on Base · <a href="/">Main site</a></div>
+</footer>
+
+<script>
+  (function () {
+    var btn = document.getElementById('copy-prompt');
+    var pre = document.getElementById('setup-prompt');
+    if (!btn || !pre) return;
+    btn.addEventListener('click', function () {
+      var text = pre.textContent;
+      var done = function () {
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = 'Copy setup prompt'; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { btn.textContent = 'Copy failed'; });
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = 'Copy failed'; }
+        document.body.removeChild(ta);
+      }
+    });
+  })();
+</script>
+</body>
+</html>

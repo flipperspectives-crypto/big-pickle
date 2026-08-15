@@ -1311,3 +1311,16 @@ section { scroll-margin-top: 96px; }
 @media (max-width: 560px) {
   .diag-grid { grid-template-columns: 1fr; }
 }
+
+/* --- For Agents section --- */
+.agents-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 26px; }
+.agent-card { background: #0d0e10; border: 1px solid #1d2024; border-radius: 14px; padding: 20px; }
+.agent-card-head { color: #ffb070; font-weight: 600; letter-spacing: .5px; margin-bottom: 10px; }
+.agent-card p { color: #c4c9d0; font-size: 14px; line-height: 1.55; }
+.agent-prompt { background: #121316; border: 1px solid #1d2024; border-radius: 12px; padding: 14px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px; line-height: 1.55; color: #e7e9ec; white-space: pre-wrap; word-break: break-word; margin: 0 0 14px; }
+.agent-facts { list-style: none; padding: 0; margin: 0 0 14px; }
+.agent-facts li { padding: 8px 0; border-bottom: 1px solid #1d2024; font-size: 14px; color: #c4c9d0; }
+.agent-facts li:last-child { border-bottom: 0; }
+.agent-facts b { color: #ffb070; font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 500; }
+.agent-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+@media (max-width: 720px) { .agents-grid { grid-template-columns: 1fr; } }

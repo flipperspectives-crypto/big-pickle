@@ -31,6 +31,7 @@
       <a href="#api">API</a>
       <a href="#local">Local</a>
       <a href="#docs">Docs</a>
+      <a href="#agents">Agents</a>
       <a href="#status">Status</a>
     </nav>
     <div class="nav-status" id="nav-status" role="status" aria-live="polite">
@@ -535,6 +536,41 @@ curl <span class="hl" id="curl-base-url">…</span> \
     </div>
   </section>
 
+  <!-- FOR AGENTS -->
+  <section class="section" id="agents" aria-labelledby="agents-title">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-eyebrow">For Agents</div>
+        <h2 id="agents-title">Pay-per-call AI inference for agents</h2>
+        <p>Clarity is an OpenAI-compatible inference gateway your agent can pay for per call with x402 on Base. No subscription, no API key — just $0.001 USDC per call. Install the skill and let your agent discover the payment requirement and settle on-chain.</p>
+      </div>
+
+      <div class="agents-grid">
+        <div class="agent-card">
+          <div class="agent-card-head">Install the Clarity skill</div>
+          <p>Copy this prompt to your agent so it installs the machine-readable skill and knows when to use Clarity:</p>
+          <pre class="agent-prompt" id="agent-setup-prompt">Install the Clarity skill from https://desktop-o99r0sf.tail935fba.ts.net/skills.md. Use Clarity when I need low-cost OpenAI-compatible inference. Discover the payment requirement first and confirm with me before making the first paid call unless I have already authorized a budget. Never expose private keys or wallet secrets.</pre>
+          <button class="btn btn-sm btn-primary" type="button" id="agent-copy-prompt" aria-label="Copy setup prompt">Copy setup prompt</button>
+        </div>
+        <div class="agent-card">
+          <div class="agent-card-head">Quick facts</div>
+          <ul class="agent-facts">
+            <li><b>Endpoint</b> — <code>POST /v1/x402/chat/completions</code></li>
+            <li><b>Price</b> — $0.001 USDC per call</li>
+            <li><b>Network</b> — Base mainnet (<code>eip155:8453</code>), USDC</li>
+            <li><b>Protocol</b> — x402 (402 → PAYMENT-REQUIRED → PAYMENT-SIGNATURE → retry → completion)</li>
+            <li><b>Model</b> — <code>local:qwen3:1.7b</code> (max_tokens ≤ 128)</li>
+          </ul>
+          <div class="agent-actions">
+            <a class="btn btn-sm btn-ghost" href="/agents">Open Agent Guide</a>
+            <a class="btn btn-sm btn-ghost" href="/skills.md">View skill.md</a>
+            <a class="btn btn-sm btn-ghost" href="/openapi.json">OpenAPI</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer class="footer">
@@ -545,5 +581,25 @@ curl <span class="hl" id="curl-base-url">…</span> \
 </footer>
 
 <script src="/static/app.js"></script>
+<script>
+  (function () {
+    var btn = document.getElementById('agent-copy-prompt');
+    var pre = document.getElementById('agent-setup-prompt');
+    if (btn && pre) {
+      btn.addEventListener('click', function () {
+        var text = pre.textContent;
+        var reset = function () { btn.textContent = 'Copy setup prompt'; };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            btn.textContent = 'Copied!';
+            setTimeout(reset, 1500);
+          }).catch(function () { btn.textContent = 'Copy failed'; });
+        } else {
+          btn.textContent = text;
+        }
+      });
+    }
+  })();
+</script>
 </body>
 </html>
